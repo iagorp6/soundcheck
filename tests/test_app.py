@@ -24,13 +24,29 @@ def test_health_endpoint(client):
     assert response.status_code == 200
     data = response.get_json()
     assert data['status'] == 'healthy'
+    assert 'uptime_seconds' in data
+    assert 'timestamp' in data
+
+def test_metrics_endpoint(client):
+    """Testa se o endpoint de métricas funciona"""
+    response = client.get('/metrics')
+    assert response.status_code == 200
+    data = response.get_json()
+    assert 'total_requests' in data
+    assert 'successful_requests' in data
+    assert 'failed_requests' in data
+    assert 'success_rate_percent' in data
+    assert 'uptime_seconds' in data
+    assert 'uptime_minutes' in data
 
 def test_request_counter(client):
     """Testa se o contador de requisições funciona"""
-    response1 = client.get('/')
-    count1 = response1.get_json()['total_requests']
-    
-    response2 = client.get('/')
-    count2 = response2.get_json()['total_requests']
-    
-    assert count2 > count1
+    metrics_before = client.get('/metrics').get_json()
+    total_before = metrics_before['total_requests']
+
+    client.get('/')
+
+    metrics_after = client.get('/metrics').get_json()
+    total_after = metrics_after['total_requests']
+
+    assert total_after > total_before
