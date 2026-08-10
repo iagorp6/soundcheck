@@ -278,6 +278,44 @@ sc_history_tail() {
 }
 
 # ---------------------------------------------------------------------------
+# sc_python: run a Python 3 that actually works
+#
+# `command -v python3` is not enough to know Python 3 exists, and this is not
+# a hypothetical. Windows ships an "App Execution Alias" at
+# AppData/Local/Microsoft/WindowsApps/python3 which is a stub advertising the
+# Microsoft Store. It is on PATH, so `command -v` finds it, and running it
+# prints an install advert TO STDOUT and exits 49.
+#
+# That combination is nastier than a plain missing command. A caller that
+# redirects stderr and reads stdout, which is exactly what parsing a metric
+# out of JSON looks like, gets the advert text back as its value. In
+# soundcheck.sh that meant the success rate could be read as the string
+# "Python was not found; ...", which awk evaluates as 0, which is below any
+# threshold. A missing interpreter would have produced a false ALERT.
+#
+# So the probe runs the interpreter and checks what comes back, rather than
+# trusting either PATH or the exit code alone. The result is cached because
+# this is called per metric field.
+# ---------------------------------------------------------------------------
+sc_python() {
+    if [ -z "${_SC_PYTHON+set}" ]; then
+        local candidate
+        _SC_PYTHON=""
+        for candidate in python3 python; do
+            command -v "$candidate" >/dev/null 2>&1 || continue
+            if [ "$("$candidate" -c 'print("sc-ok")' 2>/dev/null)" = "sc-ok" ]; then
+                _SC_PYTHON="$candidate"
+                break
+            fi
+        done
+    fi
+    [ -n "$_SC_PYTHON" ] || return 127
+    "$_SC_PYTHON" "$@"
+}
+
+sc_has_python() { sc_python -c 'pass' >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
 # Small guards
 # ---------------------------------------------------------------------------
 sc_require() {

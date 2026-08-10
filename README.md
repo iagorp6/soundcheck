@@ -81,10 +81,11 @@ This is worth being upfront about rather than quietly fixing. Finding it, workin
 out why it mattered, and building the guard rail is more useful than never having
 written it.
 
-### And three more, in my own additions
+### And four more, in my own additions
 
 I reviewed the extensions below by running them rather than reading them, and
-found three defects. Two were in the headline feature.
+found four defects. Two were in the headline feature, and the last one was found
+by a test suite I wrote specifically because their absence was the gap.
 
 **The alert rule could never fire.** `total_requests` only incremented on `/`.
 Forty requests to `/health` and `/metrics/prometheus` produced a count of one, so
@@ -106,8 +107,22 @@ sourced, so `config/retention.env` overwrote the flag's value, and the committed
 `.example` sets `LOG_FORMAT`. Copying the example broke the flag with no error.
 Fixed by giving flags their own precedence layer above the environment.
 
-All three have regression tests now. The lesson is the same one the `curl -sf`
-bug teaches: none of them failed loudly. They failed by producing a plausible
+**A fourth, found by the shell test suite on its first run.** `soundcheck.sh`
+falls back to `python3` when `jq` is missing. On Windows there is an App
+Execution Alias at `WindowsApps/python3` that is not Python: it prints "Python
+was not found; run without arguments to install from the Microsoft Store" **to
+stdout** and exits 49. `command -v python3` finds it happily.
+
+That combination is worse than a plainly missing command. The caller redirects
+stderr and reads stdout, which is what pulling a field out of JSON looks like,
+so it gets the advert text back as the value. `awk` then evaluates that
+sentence as `0`, which is below any threshold. A missing interpreter would have
+produced a false **alert** about a service that was completely fine. Fixed with
+a `sc_python` helper that probes by running the thing and checking what comes
+back, rather than trusting `PATH` or an exit code.
+
+All four have regression tests. The lesson is the same one the `curl -sf` bug
+teaches: none of them failed loudly. They failed by producing a plausible
 number.
 
 ## Architecture
@@ -157,7 +172,8 @@ flowchart LR
    it work" into a query instead of a grep on whichever machine still has it.
 
 4. **CI that checks the parts that are not Python.** shellcheck at `-S style` on
-   every script, the health-check consistency rule above, pytest on 3.9 and 3.12,
+   every script, a 38-case shell unit suite for `lib/common.sh`, the
+   health-check consistency rule above, pytest on 3.9 and 3.12,
    a real image build followed by starting it and asserting the endpoints and the
    Docker `HEALTHCHECK` respond, `promtool check rules` on the alert rules,
    `amtool check-config` on Alertmanager, and `kubeconform -strict` on the
@@ -302,6 +318,13 @@ git clone https://github.com/iagorp6/soundcheck && cd soundcheck
 cp config/retention.env.example config/retention.env   # optional, defaults work
 ```
 
+Both suites run without Docker and without installing anything:
+
+```bash
+pytest tests/            # the app
+./tests/test_common.sh   # the shell, no bats required
+```
+
 **Docker mode**
 
 ```bash
@@ -366,14 +389,19 @@ exactly like the native rules file, so the conversion is a two-space indent.
 
 ## Status
 
-The test suite passes (17 cases, up from 4) and every config file is validated in
-CI. Six of those cases are regressions for the four bugs described above, which
-is the part I would want to be judged on: the fixes are pinned, not just made.
+Two suites pass: 17 pytest cases (up from 4) and 38 shell cases for
+`lib/common.sh`. Every config file is validated in CI. A good share of those are
+regressions for the four bugs described above, which is the part I would want to
+be judged on: the fixes are pinned, not just made.
+
+The shell suite earns its place. It found the fourth bug on its first run, on
+the machine it was written on, in a code path that only misbehaves when `jq` is
+absent and Windows is present. That is exactly the kind of thing reading the
+code does not catch.
 
 The end-to-end Docker and Kind flows are written and reviewed but I have not yet
 recorded a clean run of them on this machine, and I would rather say that than
-imply otherwise. The shell has no test suite yet either, which is a gap worth
-naming in a repo whose whole argument is that shell bugs are invisible.
+imply otherwise.
 
 ## What I learned
 
@@ -406,10 +434,6 @@ rather than comments saying to be careful.
 
 ## What is next
 
-- A shell test suite. `lib/common.sh` has the config precedence logic, the JSON
-  escaping and the history parsing, and none of it is covered. One of the bugs
-  above would have been caught by three lines of `bats`. Arguing that shell
-  needs static analysis while leaving the shell untested is the obvious hole.
 - A load generator, so the alert rule, the dashboard and the HPA have real
   traffic to react to instead of a synthetic switch.
 - Actually run both flows end to end and put the output in here.

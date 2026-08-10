@@ -116,21 +116,29 @@ BASE_URL="http://localhost:${APP_PORT}"
 # confusing "command not found" that looks like the service is down.
 # ---------------------------------------------------------------------------
 json_field() {
-    local json="$1" field="$2"
+    local json="$1" field="$2" value
     if command -v jq >/dev/null 2>&1; then
         printf '%s' "$json" | jq -r --arg f "$field" '.[$f] // empty' 2>/dev/null
-    elif command -v python3 >/dev/null 2>&1; then
-        printf '%s' "$json" | python3 -c \
-            'import sys,json;d=json.load(sys.stdin);print(d.get(sys.argv[1],""))' \
-            "$field" 2>/dev/null
-    else
-        printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^,\"}]*\)\"\{0,1\}.*/\1/p" | head -n1
+        return
     fi
+
+    # sc_python, not `python3` directly. See the long comment on it in
+    # lib/common.sh: a bare `command -v python3` can find a Windows stub that
+    # prints an advert to STDOUT, which would be returned here as the field's
+    # value and then read as 0 by the threshold check, producing a false alert
+    # about a service that is perfectly fine.
+    if sc_has_python; then
+        value="$(printf '%s' "$json" | sc_python -c \
+            'import sys,json;d=json.load(sys.stdin);print(d.get(sys.argv[1],""))' \
+            "$field" 2>/dev/null)" && { printf '%s' "$value"; return; }
+    fi
+
+    printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^,\"}]*\)\"\{0,1\}.*/\1/p" | head -n1
 }
 
 pretty_json() {
     if command -v jq >/dev/null 2>&1; then jq . 2>/dev/null || cat
-    elif command -v python3 >/dev/null 2>&1; then python3 -m json.tool 2>/dev/null || cat
+    elif sc_has_python; then sc_python -m json.tool 2>/dev/null || cat
     else cat
     fi
 }
@@ -164,7 +172,7 @@ check_docker() {
         # answer at all, even with an error?", and -f would collapse that back
         # into the same failure as a refused connection: destroying exactly
         # the distinction this branch exists to draw. CI enforces the marker.
-        if curl -s --max-time 5 -o /dev/null "${BASE_URL}${HEALTH_PATH}" 2>/dev/null; then
+        if curl -s --max-time 5 -o /dev/null "${BASE_URL}${HEALTH_PATH}" 2>/dev/null; then  # intentional-plain-curl
             sc_err "  the server IS reachable: it is returning an error status."
             sc_err "  this is precisely the case plain 'curl -s' reported as healthy."
         else

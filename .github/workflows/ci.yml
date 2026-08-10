@@ -31,8 +31,8 @@ permissions:
 
 jobs:
   # -------------------------------------------------------------------------
-  shellcheck:
-    name: shellcheck
+  shell:
+    name: shell (shellcheck + unit tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +47,7 @@ jobs:
           shellcheck --version
           shellcheck -x -S style \
             showtime.sh soundcheck.sh encore.sh \
-            lib/common.sh k8s/observability/install.sh
+            lib/common.sh k8s/observability/install.sh tests/test_common.sh
 
       - name: Assert every curl uses -f unless it says why not
         # A repo-specific rule no generic linter can enforce: `curl -s` without
@@ -59,16 +59,34 @@ jobs:
         # listening", and it must NOT fail on 5xx. It carries an explicit
         # marker comment. Requiring the marker means the exception has to be a
         # decision someone wrote down, not an oversight that looks identical.
+        #
+        # The filters matter. A naive grep for `curl -s` flags this repo's own
+        # documentation, because half the comments and error strings quote the
+        # bug in order to explain it. A check that cries wolf on prose gets
+        # deleted by the third person who trips over it, so it excludes
+        # comment lines and quoted occurrences and looks only at real calls.
         run: |
           offenders=$(grep -rn --include='*.sh' -E 'curl +-s([^f]|$)' . \
+                      | grep -vE ':[0-9]+:[[:space:]]*#' \
+                      | grep -vE "['\`\"]curl +-s" \
                       | grep -v 'intentional-plain-curl' || true)
           if [ -n "$offenders" ]; then
             echo "$offenders"
             echo "::error::'curl -s' without -f and without an intentional-plain-curl marker."
             echo "Without -f, curl exits 0 on HTTP 500 and a broken service reads as healthy."
+            echo "If the plain form is genuinely correct, say so on the line with"
+            echo "a trailing '# intentional-plain-curl' comment."
             exit 1
           fi
           echo "OK: every curl either uses -f or documents why it does not"
+
+      - name: Shell unit tests
+        # lib/common.sh holds the config precedence rules, the JSON escaping
+        # and the deploy-history parsing. Arguing that shell needs machine
+        # checking while leaving the shell itself untested was the obvious
+        # hole, and two of the bugs in this repo's history would have been
+        # caught here. Nothing to install: the harness is in the file.
+        run: ./tests/test_common.sh -v
 
   # -------------------------------------------------------------------------
   test:
