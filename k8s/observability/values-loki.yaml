@@ -1,0 +1,79 @@
+# ===========================================================================
+# Helm values for grafana/loki: single-binary mode
+# ===========================================================================
+# The cluster-side twin of observability/loki/config.yml. Same decisions,
+# expressed as chart values instead of a config file: one replica, filesystem
+# storage, no multi-tenancy, TSDB index.
+#
+# `singleBinary` is Loki's monolithic deployment mode. Every component in one
+# process. The chart's default is the microservices layout (distributor,
+# ingester, querier, query-frontend, compactor as separate Deployments), which
+# is correct at scale and absurd for one app on a laptop.
+# ===========================================================================
+
+fullnameOverride: soundcheck-loki
+
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+
+  storage:
+    type: filesystem
+
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+
+  limits_config:
+    # Same reason as the Compose stack: Promtail replays deploy_history.log
+    # from the beginning, and those events are legitimately old. With the
+    # default one-week cutoff that history is silently dropped.
+    reject_old_samples: false
+    reject_old_samples_max_age: 8760h
+    ingestion_rate_mb: 8
+    ingestion_burst_size_mb: 16
+
+  analytics:
+    reporting_enabled: false
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  persistence:
+    enabled: true
+    size: 2Gi
+
+# Components that only exist in the microservices layout. Explicitly zeroed so
+# the chart cannot schedule Pods that have nothing to do.
+read: { replicas: 0 }
+write: { replicas: 0 }
+backend: { replicas: 0 }
+
+# The chart bundles these; neither is wanted here.
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+test:
+  enabled: false
+lokiCanary:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+gateway:
+  enabled: false

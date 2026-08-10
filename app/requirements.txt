@@ -1,3 +1,6 @@
+# Runtime dependencies only. pytest used to be listed here too, which put a
+# test framework inside the production image: more to install, more to scan,
+# more to patch, for something the running service never imports. Test-only
+# dependencies live in tests/requirements.txt.
 flask==2.3.0
 werkzeug==2.3.8
-pytest==8.2.0

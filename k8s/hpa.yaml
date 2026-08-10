@@ -1,0 +1,77 @@
+# ===========================================================================
+# HorizontalPodAutoscaler: optional, and honest about its prerequisite
+# ===========================================================================
+# NOT APPLIED BY showtime.sh --k8s. That script applies the namespace,
+# ConfigMap, Deployment and Service only, because this object is useless
+# without metrics-server and a deploy script that silently creates broken
+# objects is worse than one that leaves them to you. Apply it by hand:
+#
+#   kubectl -n soundcheck apply -f k8s/hpa.yaml
+#
+# REQUIRES metrics-server, which Kind does NOT ship with. Without it the HPA
+# reports `<unknown>/70%` forever and scales nothing. Install it first:
+#
+#   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+#   # on Kind, metrics-server needs to skip TLS verification of kubelet certs:
+#   kubectl -n kube-system patch deploy metrics-server --type=json \
+#     -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+#
+# HOW IT WORKS: the controller compares actual CPU usage against the `requests`
+# value in deployment.yaml (50m) and adjusts replica count to hold the target
+# ratio. Utilization is a percentage OF THE REQUEST, not of a core, which is
+# why an HPA on a Deployment with no CPU request cannot work at all.
+#
+# WHY THIS IS THE LEAST INTERESTING FILE HERE: autoscaling a stateless
+# hello-world on CPU is the easy case. The genuinely hard parts (scaling on a
+# queue depth or a custom metric, cooldown tuning, interaction with cluster
+# autoscaling) all need a workload with real load behind it. This is included
+# because the wiring is worth showing, not because it is a hard problem
+# solved.
+# ===========================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: soundcheck
+  namespace: soundcheck
+  labels:
+    app.kubernetes.io/name: soundcheck
+    app.kubernetes.io/part-of: soundcheck
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: soundcheck
+
+  minReplicas: 2
+  maxReplicas: 6
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+  # ------------------------------------------------------------------------
+  # Scaling behaviour: asymmetric on purpose.
+  #
+  # Scale UP fast: being under-provisioned is a user-visible outage.
+  # Scale DOWN slowly: being over-provisioned for five minutes costs a little
+  # money, while removing capacity from a spiky workload causes thrash. Scale
+  # down, load returns, scale up, repeat. The five-minute stabilization window
+  # makes the controller wait for a sustained lull before believing it.
+  # ------------------------------------------------------------------------
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100      # allowed to double
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1        # one Pod at a time
+          periodSeconds: 60

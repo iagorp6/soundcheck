@@ -1,0 +1,12 @@
+# Everything in this repo runs on Linux: the container the app runs in, the
+# GitHub Actions runner, the Kind node. Force LF line endings so a CRLF can
+# never reach a shell script and turn `./showtime.sh` into
+# "bad interpreter: /usr/bin/env bash^M".
+#
+# This matters here specifically because I develop on Windows with
+# core.autocrlf=true. Without this file git would convert every checked-out
+# script to CRLF, and the failure would surface in CI rather than locally,
+# which is the worse place to find it.
+#
+# Applies regardless of what core.autocrlf the person cloning has set.
+* text=auto eol=lf

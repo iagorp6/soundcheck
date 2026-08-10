@@ -1,0 +1,29 @@
+# Datasources as configuration, not as clicks.
+#
+# The `uid` fields are fixed on purpose. Grafana generates a random uid for a
+# datasource created in the UI, and the dashboard JSON references datasources
+# BY uid, so a dashboard built against a random uid breaks on any other
+# machine. Pinning them is what makes observability/grafana/dashboards/*.json
+# portable.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: soundcheck-prometheus
+    access: proxy
+    url: http://soundcheck-prometheus:9090
+    isDefault: true
+    jsonData:
+      # Tells Grafana the smallest sensible step, so it does not ask for data
+      # at a finer resolution than Prometheus ever collected.
+      timeInterval: 10s
+    editable: false
+
+  - name: Loki
+    type: loki
+    uid: soundcheck-loki
+    access: proxy
+    url: http://soundcheck-loki:3100
+    editable: false

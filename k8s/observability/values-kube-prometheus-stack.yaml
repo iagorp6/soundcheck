@@ -1,0 +1,138 @@
+# ===========================================================================
+# Helm values for prometheus-community/kube-prometheus-stack
+# ===========================================================================
+# The Kubernetes-mode equivalent of observability/docker-compose.yml. Same
+# four components (Prometheus, Alertmanager, Grafana, exporters), installed by
+# a chart instead of assembled by hand.
+#
+# The interesting difference is HOW Prometheus finds things. In Docker mode
+# the scrape target is written out by hand in prometheus.yml. Here the
+# Prometheus Operator watches for ServiceMonitor and PodMonitor objects and
+# GENERATES the scrape config from them, so a new service becomes monitored
+# by creating a Kubernetes object, not by editing a config file and reloading.
+# That is the same shift from imperative to declarative that separates this
+# repo from ensemble, showing up inside the monitoring layer.
+#
+# Sized for a Kind cluster on a laptop, not for a real one.
+# ===========================================================================
+
+fullnameOverride: soundcheck-obs
+
+# --- Prometheus ------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    retention: 3d
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+
+    # By default the Operator only picks up ServiceMonitors that carry the
+    # chart's own release label. Setting these to false means "watch every
+    # namespace, match everything": right for a demo cluster, wrong for a
+    # shared one, where it turns any team's stray object into your problem.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    resources:
+      requests: { cpu: 100m, memory: 400Mi }
+      limits: { memory: 900Mi }
+
+    # No PersistentVolume. Kind has a default storage class, but metrics that
+    # survive a cluster this disposable are not worth the moving parts,
+    # `kind delete cluster` is the intended cleanup.
+    storageSpec: {}
+
+    # Scrapes anything carrying the prometheus.io/scrape annotations, which is
+    # what k8s/deployment.yaml sets. This is the classic annotation-based
+    # discovery pattern, kept here so the app is picked up without needing a
+    # ServiceMonitor, and so the mechanism is visible rather than magic.
+    additionalScrapeConfigs:
+      - job_name: annotated-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          # Rewrite the address to use the annotated port. The __address__
+          # label arrives as ip:port; this swaps in the port the Pod declared.
+          - source_labels:
+              [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: service
+
+# --- Alertmanager ----------------------------------------------------------
+alertmanager:
+  config:
+    route:
+      group_by: ["alertname", "severity"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: default
+      routes:
+        - matchers: ['severity = "info"']
+          receiver: deploy-feed
+          repeat_interval: 24h
+    receivers:
+      - name: default
+      - name: deploy-feed
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { memory: 128Mi }
+
+# --- Grafana ---------------------------------------------------------------
+grafana:
+  adminPassword: admin
+
+  # The sidecar watches every namespace for ConfigMaps labelled
+  # `grafana_dashboard: "1"` and drops their contents into Grafana. That is
+  # what lets install.sh load THE SAME soundcheck.json used by the Docker
+  # Compose stack, instead of a second hand-maintained copy that drifts.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: soundcheck-loki
+      access: proxy
+      url: http://soundcheck-loki.observability.svc.cluster.local:3100
+
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+# --- Trimming the stack ----------------------------------------------------
+# kube-prometheus-stack ships a lot of cluster-level monitoring. Most of it is
+# genuinely useful on a real cluster and pure overhead on a two-node Kind
+# cluster on a laptop, so it is switched off deliberately rather than left on
+# and quietly consuming the memory the app needs.
+kubeApiServer: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeProxy: { enabled: false }
+kubeEtcd: { enabled: false }
+nodeExporter: { enabled: true }
+kubeStateMetrics: { enabled: true }
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }

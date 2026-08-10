@@ -1,0 +1,124 @@
+# ===========================================================================
+# Promtail: reads logs, labels them, pushes them to Loki
+# ===========================================================================
+# Promtail's whole job is three steps: find log lines, attach a small set of
+# labels, ship them. The pipeline_stages below are where the value is added:
+# a raw JSON line in a file becomes a queryable event with a real timestamp
+# and labels you can filter on.
+#
+# LABEL DISCIPLINE, because it is the one thing that goes wrong with Loki:
+# every distinct combination of label values creates a separate stream, and
+# streams are the unit of cost. `version` and `result` are fine. A handful of
+# values each. Putting a TIMESTAMP or a request ID in a label would create one
+# stream per line and melt the index. High-cardinality data belongs in the log
+# BODY, where Loki greps it at query time for free.
+# ===========================================================================
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+# Where Promtail remembers how far it has read in each file. Without this it
+# would re-ship every file from the beginning on every restart.
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://soundcheck-loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # -------------------------------------------------------------------------
+  # 1. The deploy event log written by showtime.sh / encore.sh
+  # -------------------------------------------------------------------------
+  # This is the source that turns deploy history into something queryable.
+  # After this, questions like "show me every failed deploy of 1.2.x" are a
+  # LogQL expression instead of a grep through a file on whichever box still
+  # has it:
+  #
+  #   {job="deploy-history", result="failure"}
+  #   {job="deploy-history"} | json | version = "1.2.0"
+  - job_name: deploy-history
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: deploy-history
+          service: soundcheck
+          # `__path__` is the special label Promtail reads as "tail this".
+          # /repo is the repository root, mounted read-only by compose.
+          __path__: /repo/deploy_history.log
+
+    pipeline_stages:
+      # Parse the line as JSON and pull named fields out into the pipeline's
+      # extracted map. This does not change the stored line; it just makes
+      # fields available to the stages below.
+      - json:
+          expressions:
+            ts: ts
+            action: action
+            tool: tool
+            mode: mode
+            version: version
+            result: result
+
+      # Use the event's OWN timestamp rather than "now". Without this stage,
+      # every line ingested on the first run would be stamped with the moment
+      # Promtail started, and the deploy history would collapse into a single
+      # instant, which is exactly what makes replayed historical logs useless.
+      - timestamp:
+          source: ts
+          format: RFC3339
+
+      # Promote a deliberately small set of fields to labels. Anything not
+      # listed here stays in the body and is still searchable with `| json`.
+      - labels:
+          action:
+          tool:
+          mode:
+          result:
+          version:
+
+  # -------------------------------------------------------------------------
+  # 2. The application's own stdout, via the Docker API
+  # -------------------------------------------------------------------------
+  # docker_sd_configs asks the Docker daemon which containers exist and
+  # follows their log streams. This works on Docker Desktop, where the
+  # host path /var/lib/docker/containers is not reachable, so it is the
+  # portable choice rather than a file-based one.
+  #
+  # It also means a container created LATER by showtime.sh is picked up
+  # automatically: refresh_interval controls how quickly.
+  - job_name: docker-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+
+    relabel_configs:
+      # Docker's container name arrives as "/soundcheck-app". The leading
+      # slash is an artifact of the API and would show up in every label.
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
+      # Only ship containers this project created. Without this filter,
+      # Prometheus, Grafana and Loki would all log into Loki, and Loki logging
+      # its own ingestion into itself is a feedback loop worth avoiding.
+      - source_labels: ["container"]
+        regex: "soundcheck-(app|candidate)"
+        action: keep
+      - target_label: job
+        replacement: soundcheck-app
+      - target_label: service
+        replacement: soundcheck
+
+    pipeline_stages:
+      # The app emits JSON only when LOG_FORMAT=json is set on the container;
+      # otherwise these lines are Flask's plain access log. `drop_malformed`
+      # keeps the non-JSON lines flowing through untouched instead of
+      # erroring the pipeline on every one of them.
+      - json:
+          expressions:
+            event: event
+            status: status
+            version: version
+          drop_malformed: false
+      - labels:
+          event:

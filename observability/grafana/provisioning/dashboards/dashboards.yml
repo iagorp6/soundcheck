@@ -1,0 +1,21 @@
+# Tells Grafana to load every dashboard JSON file in a directory on startup
+# and keep watching it for changes.
+#
+# `allowUiUpdates: false` is the deliberate part: edits made in the browser
+# cannot be saved. That sounds hostile until the first time a dashboard
+# someone tweaked at 2am is the only copy and nobody can diff it. Explore
+# freely in the UI; to make a change stick, edit the file and commit it.
+
+apiVersion: 1
+
+providers:
+  - name: soundcheck
+    orgId: 1
+    folder: soundcheck
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

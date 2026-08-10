@@ -1,0 +1,197 @@
+# ===========================================================================
+# The Deployment: the same deploy/verify/rollback story, told by the
+# orchestrator instead of by showtime.sh
+# ===========================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: soundcheck
+  namespace: soundcheck
+  labels:
+    app.kubernetes.io/name: soundcheck
+    app.kubernetes.io/part-of: soundcheck
+spec:
+  replicas: 2
+
+  # How many old ReplicaSets to keep. This is what `kubectl rollout undo`,
+  # what encore.sh --k8s calls. Actually rolls back TO. Set it to 0 and the
+  # rollback capability disappears silently; there is no error, there is just
+  # nothing to go back to. It is the cluster-side equivalent of
+  # RETENTION_COUNT in config/retention.env.
+  revisionHistoryLimit: 5
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: soundcheck
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # This pair is the Kubernetes-native version of the blue-green dance
+      # showtime.sh does by hand with port 8081.
+      #   maxUnavailable: 0  never remove an old Pod until a new one is Ready
+      #   maxSurge: 1        allow one extra Pod above `replicas` while doing it
+      # Together: the new version is proven healthy while the old one is still
+      # serving, and a new version that never becomes Ready simply never
+      # displaces anything. The old Pods keep taking traffic and the rollout
+      # stalls, which is `kubectl rollout status` returning non-zero, which is
+      # what showtime.sh --k8s treats as a failed deploy.
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: soundcheck
+        app.kubernetes.io/part-of: soundcheck
+      annotations:
+        # Read by the Prometheus Kubernetes service discovery (and by the
+        # kube-prometheus-stack's additionalScrapeConfigs). Same target, same
+        # endpoint, same metrics as the Docker-mode scrape: Prometheus does
+        # not care whether it is scraping a container or a Pod.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics/prometheus"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          # The tag here is a placeholder. showtime.sh --k8s overwrites it with
+          # `kubectl set image`, which is what creates a new revision. The
+          # imperative counterpart to ensemble's ArgoCD, where the image
+          # reference is committed to Git and a controller reconciles it.
+          image: soundcheck-app:latest
+          # IfNotPresent matters on Kind: `kind load docker-image` puts the
+          # image into the node's own store, and Always would send the kubelet
+          # off to a registry that has never heard of it.
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: soundcheck-config
+
+          env:
+            # Surfaces the Pod name inside the app, so a log line can say
+            # which replica produced it. The downward API is how a Pod reads
+            # facts about itself without querying the API server.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+          # -----------------------------------------------------------------
+          # THE PROBES: readiness vs liveness
+          # -----------------------------------------------------------------
+          # They point at the same URL and mean completely different things.
+          # This is the distinction most people get wrong, and getting it
+          # wrong turns a small problem into an outage.
+          #
+          #   readinessProbe = "should this Pod receive traffic RIGHT NOW?"
+          #     Failing it removes the Pod from the Service's endpoint list.
+          #     Nothing is killed, nothing restarts, the process keeps running
+          #     and keeps its state. When it passes again, traffic returns.
+          #     This is the correct probe for: still warming up, a dependency
+          #     is briefly unavailable, temporarily overloaded.
+          #
+          #   livenessProbe  = "is this process beyond saving?"
+          #     Failing it makes the kubelet KILL the container and start a
+          #     new one. The only correct answer to it is "restarting me will
+          #     help": a deadlock, a wedged event loop, a leaked handle.
+          #
+          # THE CLASSIC MISTAKE: pointing a liveness probe at an endpoint that
+          # depends on the database. The database has a bad ten minutes, every
+          # Pod fails liveness, the cluster restarts all of them, they come
+          # back cold and hammer the recovering database, and a degradation
+          # becomes an outage: caused entirely by the probe. Readiness would
+          # have handled it correctly: stop sending traffic, change nothing
+          # else, resume when it recovers.
+          #
+          # Rule of thumb: readiness may check dependencies. Liveness must
+          # only check the process itself. When in doubt, ship readiness and
+          # leave liveness off: a missing liveness probe costs you automatic
+          # recovery from a hang; a wrong one costs you a restart loop.
+          # -----------------------------------------------------------------
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            # One failure is enough to stop sending traffic: it is cheap and
+            # fully reversible.
+            failureThreshold: 1
+            successThreshold: 1
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            # Deliberately slack. Three consecutive failures, ten seconds
+            # apart, means roughly thirty seconds of being definitively
+            # unresponsive before anything gets killed. Restarting is
+            # destructive; make it earn the right.
+            failureThreshold: 3
+
+          # A startup probe suspends the liveness probe until the app has
+          # booted once. Without it, a slow start and an aggressive liveness
+          # probe produce the worst failure mode there is: a container killed
+          # for being slow, restarted, killed again for being slow. A crash
+          # loop caused purely by the monitoring. This app starts in about a
+          # second; the probe is here because the pattern is worth showing,
+          # and it costs nothing.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15   # up to 30s to come up
+
+          # Requests are what the scheduler uses to place the Pod, and what
+          # the HorizontalPodAutoscaler measures CPU usage AGAINST. An HPA
+          # targeting 70% CPU with no request set has nothing to compute a
+          # percentage of and simply will not scale.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # No CPU limit on purpose: a CPU limit throttles rather than
+              # kills, and throttling a latency-sensitive process to enforce a
+              # ceiling nobody is contending for makes it slower for no gain.
+              # A MEMORY limit, on the other hand, is essential. Memory is
+              # not compressible, and a leaking Pod without one takes the
+              # whole node down with it.
+              memory: 128Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          # readOnlyRootFilesystem above means Python cannot write anywhere,
+          # including /tmp. An explicit in-memory scratch volume gives it one
+          # writable path without giving up the read-only guarantee.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Give the app a moment to finish in-flight requests on shutdown rather
+      # than cutting them off. 30s is the default; stated explicitly because
+      # it is a decision, not an accident.
+      terminationGracePeriodSeconds: 30

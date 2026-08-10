@@ -1,0 +1,39 @@
+# ===========================================================================
+# Application configuration, held outside the image
+# ===========================================================================
+# Same principle as radio-kiosk's station.conf: the thing that varies between
+# environments is DATA, and data does not belong in a build artifact. An image
+# that must be rebuilt to change a message is not an artifact you can promote
+# from staging to production: it is a different build, and therefore a
+# different thing from the one that was tested.
+#
+# Here that means the same image tag runs in every environment and the
+# ConfigMap is what differs.
+#
+# NOT SECRETS. A ConfigMap is stored unencrypted in etcd and is readable by
+# anything with get access to the namespace. Passwords and tokens belong in a
+# Secret at minimum, and realistically in something like SOPS or a vault,
+# which is what ensemble's `backstage` layer exists to handle.
+#
+# One catch worth knowing: values injected with `envFrom` are read by the
+# process at startup, so editing this ConfigMap does NOT change a running Pod.
+# The rollout has to be restarted for it to take effect:
+#     kubectl -n soundcheck rollout restart deploy/soundcheck
+# ===========================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: soundcheck-config
+  namespace: soundcheck
+  labels:
+    app.kubernetes.io/name: soundcheck
+    app.kubernetes.io/part-of: soundcheck
+data:
+  APP_MESSAGE: "soundcheck: running on Kubernetes"
+  # json makes the app emit one structured line per event on stdout, which is
+  # what a cluster log agent (Promtail, Alloy, Fluent Bit) wants to consume.
+  LOG_FORMAT: "json"
+  # The deliberate-failure switch, off. Flip to "1" and redeploy to watch the
+  # readinessProbe pull the Pod out of the Service's endpoints. The clearest
+  # possible demonstration of what a readiness probe is for.
+  HEALTH_FAIL: "0"

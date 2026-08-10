@@ -1,6 +1,24 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-.env
+*.py[cod]
+.pytest_cache/
 .venv/
 venv/
+.env
+
+# Local runtime config. The .example file is what gets committed — the real
+# one is per-machine, and committing it would mean everyone's laptop fighting
+# over the same ports and retention numbers in Git.
+config/retention.env
+
+# The append-only event log written by showtime.sh and encore.sh. This is
+# machine state, not source: it describes what happened on ONE host, and
+# merging two people's deploy histories in a pull request is meaningless.
+# deploy_history.log.example is committed so the format is documented.
+deploy_history.log
+logs/
+
+# Kubernetes / Helm
+kubeconfig
+*.kubeconfig
+charts/

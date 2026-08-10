@@ -1,0 +1,81 @@
+# ===========================================================================
+# Loki: single-binary, filesystem-backed
+# ===========================================================================
+# Everything here is scaled for one laptop and one app. Loki can run as a
+# dozen microservices behind object storage; this is the other end of that
+# dial, and choosing the small end deliberately is part of the point.
+# ===========================================================================
+
+# No multi-tenancy. With auth enabled, every read and write needs an
+# X-Scope-OrgID header and forgetting it produces confusing empty results.
+# One tenant, no header.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  # One copy of everything. Replication only makes sense across nodes, and
+  # there is exactly one node.
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      # TSDB is the current index. The older boltdb-shipper still works but
+      # tsdb is what new installs should use: faster queries, smaller index.
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # ------------------------------------------------------------------------
+  # THE setting that matters for this repo.
+  #
+  # By default Loki rejects log lines whose timestamp is older than a week,
+  # because in a live system an old timestamp usually means a broken clock or
+  # a replay bug. Here it is normal: Promtail tails deploy_history.log, which
+  # is an append-only file that can legitimately contain months of deploy
+  # events, and on first start it ships the whole thing. With the default,
+  # that history would be silently dropped and the "query my deploys by
+  # version" story would only work for deploys made this week.
+  # ------------------------------------------------------------------------
+  reject_old_samples: false
+  reject_old_samples_max_age: 8760h   # 1 year
+
+  # Guard rails for a local box. A runaway log loop should hit a limit and
+  # complain, not fill the disk.
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+  max_query_series: 500
+
+# Delete anything older than 7 days. Retention has to be switched on
+# explicitly; without this the compactor tidies the index but never removes
+# chunks, and "small local demo stack" turns into a disk-space incident a few
+# months later.
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 168h
+
+# Nothing phones home from a demo box.
+analytics:
+  reporting_enabled: false

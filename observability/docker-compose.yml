@@ -1,0 +1,172 @@
+# ===========================================================================
+# observability: a small, real Prometheus/Grafana/Loki/Alertmanager stack
+# ===========================================================================
+# WHAT: five containers that watch the app showtime.sh deploys. Metrics
+#       (Prometheus), dashboards (Grafana), logs (Loki + Promtail), and alert
+#       routing (Alertmanager).
+#
+# WHY THE APP IS NOT IN THIS FILE: the one design decision worth reading:
+#
+#   The obvious thing would be to add the app as a sixth service here. It is
+#   deliberately not, because the app's lifecycle belongs to showtime.sh, and
+#   merging the two lifecycles creates a footgun: `docker compose down` in the
+#   observability directory would take the service down with the monitoring.
+#   Your dashboards and your workload should never share a kill switch.
+#
+#   Instead both sides attach to one external Docker network. showtime.sh
+#   creates it and joins the app with `--network-alias soundcheck-app`;
+#   Prometheus resolves that name through Docker's embedded DNS. Two
+#   independent lifecycles, one network, name-based discovery. The same
+#   separation a real setup has between a deploy pipeline and a monitoring
+#   platform.
+#
+#   Consequence, and it is the correct behaviour: bring this stack up before
+#   deploying anything and Prometheus will show the target as DOWN. That is
+#   the truth, and a monitoring system that pretended otherwise would be worse.
+#
+# RUN
+#   docker network create soundcheck-net    # or just run ./showtime.sh once
+#   docker compose -f observability/docker-compose.yml up -d
+#   ./showtime.sh 1.0.0
+#
+#   Grafana        http://localhost:3000   (admin / admin)
+#   Prometheus     http://localhost:9090
+#   Alertmanager   http://localhost:9093
+# ===========================================================================
+
+name: soundcheck-observability
+
+networks:
+  soundcheck-net:
+    # `external: true` means "this network already exists, do not manage it".
+    # That is what lets a container created outside compose live on it.
+    external: true
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+
+services:
+  # -------------------------------------------------------------------------
+  # Prometheus: pulls, stores, and evaluates the rules
+  # -------------------------------------------------------------------------
+  # Prometheus is a PULL system: nothing pushes metrics to it, it goes and
+  # scrapes HTTP endpoints on a timer. That is why the app needed a
+  # /metrics/prometheus endpoint rather than a client library reporting
+  # somewhere, and it is why a target that disappears becomes visibly `down`
+  # instead of just going quiet.
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: soundcheck-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      # Lets `curl -X POST localhost:9090/-/reload` apply config changes
+      # without a restart, which matters when you are iterating on a rule.
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [soundcheck-net]
+
+  # -------------------------------------------------------------------------
+  # Alertmanager: decides what to DO about a firing rule
+  # -------------------------------------------------------------------------
+  # The split confuses people at first: Prometheus EVALUATES rules and decides
+  # an alert is firing; Alertmanager receives firing alerts and handles
+  # grouping, silencing, inhibition and delivery. They are separate because
+  # those are separate concerns: you want to silence a page without touching
+  # the rule that produced it.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: soundcheck-alertmanager
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+    networks: [soundcheck-net]
+
+  # -------------------------------------------------------------------------
+  # Loki: logs, indexed by label rather than by content
+  # -------------------------------------------------------------------------
+  # The idea that makes Loki cheap: it does NOT full-text index log bodies. It
+  # indexes only a small set of labels (service, version, result) and stores
+  # the rest compressed. Queries filter by label first, then grep the matching
+  # chunks. That is why label choice matters so much here and why putting a
+  # high-cardinality value like a timestamp in a label would be a mistake.
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: soundcheck-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks: [soundcheck-net]
+
+  # -------------------------------------------------------------------------
+  # Promtail: the agent that ships logs into Loki
+  # -------------------------------------------------------------------------
+  # Two sources, deliberately:
+  #   1. deploy_history.log. The JSON events showtime.sh and encore.sh write.
+  #      This is what makes "when did 1.2.0 go out, and did it succeed?" a
+  #      query instead of an archaeology session.
+  #   2. the app container's own stdout, discovered through the Docker API.
+  #
+  # The repo root is mounted read-only. Read-only because a log shipper has no
+  # business being able to write to the thing it reads.
+  promtail:
+    image: grafana/promtail:2.9.8
+    container_name: soundcheck-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - ..:/repo:ro
+      # The Docker socket is how Promtail discovers containers and reads their
+      # logs. Worth being clear-eyed: mounting the socket grants control of the
+      # Docker daemon, which is effectively root on the host. Acceptable for a
+      # local demo stack, NOT something to copy onto a shared machine without
+      # a socket proxy in front of it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    networks: [soundcheck-net]
+
+  # -------------------------------------------------------------------------
+  # Grafana: one provisioned dashboard, zero manual clicking
+  # -------------------------------------------------------------------------
+  # Datasources and dashboards are files mounted into /etc/grafana/provisioning.
+  # A dashboard built in the UI lives only in Grafana's database: it cannot be
+  # reviewed, cannot be diffed, and dies with the container. As a file it gets
+  # code review and version history like everything else.
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: soundcheck-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # No sign-up, no anonymous access, no phone-home on a demo box.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus, loki]
+    networks: [soundcheck-net]

@@ -1,0 +1,229 @@
+# ===========================================================================
+# CI
+# ===========================================================================
+# The original workflow ran pytest and echoed a tick. That proves the Python
+# is fine and says nothing about the three shell scripts, the Dockerfile, the
+# Prometheus rules or the Kubernetes manifests: which is most of this repo.
+#
+# The shellcheck job is the pointed one. The bug this whole repo is named
+# after was `curl -s` in monitor.sh where deploy.sh correctly used `curl -sf`:
+# an inconsistency between two files that never fails loudly, just quietly
+# reports a broken service as healthy. Static analysis on every push is how
+# that class of thing gets caught by a machine instead of by luck.
+# ===========================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# Cancel a running CI when new commits land on the same branch. No point
+# burning minutes on a commit that has already been superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck on every script
+        # -x follows `source` directives, so lib/common.sh is analysed in the
+        # context of the scripts that use it: without it, every variable
+        # defined there looks undefined to the checker.
+        # -S style is the strictest level; anything less would let exactly the
+        # kind of quoting and consistency issue this repo is about slip past.
+        run: |
+          shellcheck --version
+          shellcheck -x -S style \
+            showtime.sh soundcheck.sh encore.sh \
+            lib/common.sh k8s/observability/install.sh
+
+      - name: Assert every curl uses -f unless it says why not
+        # A repo-specific rule no generic linter can enforce: `curl -s` without
+        # `-f` exits 0 on an HTTP 500, so any health check written that way
+        # reports a broken service as healthy. That was the original bug.
+        #
+        # There IS one legitimate plain `curl -s` in soundcheck.sh. It is how
+        # "the server answered with an error" is told apart from "nothing is
+        # listening", and it must NOT fail on 5xx. It carries an explicit
+        # marker comment. Requiring the marker means the exception has to be a
+        # decision someone wrote down, not an oversight that looks identical.
+        run: |
+          offenders=$(grep -rn --include='*.sh' -E 'curl +-s([^f]|$)' . \
+                      | grep -v 'intentional-plain-curl' || true)
+          if [ -n "$offenders" ]; then
+            echo "$offenders"
+            echo "::error::'curl -s' without -f and without an intentional-plain-curl marker."
+            echo "Without -f, curl exits 0 on HTTP 500 and a broken service reads as healthy."
+            exit 1
+          fi
+          echo "OK: every curl either uses -f or documents why it does not"
+
+  # -------------------------------------------------------------------------
+  test:
+    name: pytest (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't cancel 3.12 because 3.9 failed. Knowing whether a failure is
+      # version-specific is most of the diagnostic value of a matrix.
+      fail-fast: false
+      matrix:
+        # 3.9 is what the Dockerfile ships; 3.12 is what a contributor's
+        # laptop probably has. Both must pass.
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r app/requirements.txt
+          pip install -r tests/requirements.txt
+
+      - name: Run the suite
+        # From the repo root, not `cd tests`. The suite used to only work from
+        # inside tests/ because of a relative sys.path insert; running it from
+        # here is what proves that is fixed.
+        run: pytest tests/ -v
+
+  # -------------------------------------------------------------------------
+  build:
+    name: build image and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t soundcheck-app:ci app/
+
+      # ---------------------------------------------------------------------
+      # Building an image proves it compiles. Starting it proves it runs.
+      # Those are different claims and CI should make the second one.
+      # ---------------------------------------------------------------------
+      - name: Start the container
+        run: |
+          docker run -d --name ci-app -p 8080:8080 \
+            -e APP_VERSION=ci soundcheck-app:ci
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health >/dev/null; then
+              echo "up after ${i} attempts"; exit 0
+            fi
+            sleep 1
+          done
+          docker logs ci-app
+          exit 1
+
+      - name: Health and metrics endpoints answer
+        run: |
+          curl -sf http://localhost:8080/health  | grep -q '"status": "healthy"'
+          curl -sf http://localhost:8080/metrics | grep -q success_rate_percent
+
+      - name: Prometheus exposition is well formed
+        # promtool check metrics is the real parser Prometheus uses. It
+        # catches naming violations and malformed lines that a `grep` for the
+        # metric name would happily wave through.
+        run: |
+          curl -sf http://localhost:8080/metrics/prometheus \
+            | docker run --rm -i --entrypoint promtool prom/prometheus:v2.53.0 check metrics
+
+      - name: Docker HEALTHCHECK reports healthy
+        # Verifies the HEALTHCHECK directive in the Dockerfile actually works,
+        # which nothing else here would notice if it were broken.
+        run: |
+          for i in $(seq 1 20); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' ci-app)
+            echo "attempt ${i}: ${status}"
+            [ "$status" = healthy ] && exit 0
+            sleep 2
+          done
+          exit 1
+
+      # ---------------------------------------------------------------------
+      # The regression test for the original bug, run against a real server.
+      # A container with HEALTH_FAIL=1 serves HTTP 503 while staying alive.
+      # `curl -s` must succeed against it (that is the bug) and `curl -sf`
+      # must fail (that is the fix). If either assertion ever flips, the
+      # premise this repo is built on has changed and someone should know.
+      # ---------------------------------------------------------------------
+      - name: The -s vs -sf distinction still holds
+        run: |
+          docker run -d --name ci-broken -p 8082:8080 \
+            -e HEALTH_FAIL=1 soundcheck-app:ci
+          sleep 5
+
+          if ! curl -s http://localhost:8082/health >/dev/null; then
+            echo "::error::curl -s failed against a 503: premise changed"; exit 1
+          fi
+          echo "curl -s   exit 0 against HTTP 503  <- the original bug"
+
+          if curl -sf http://localhost:8082/health >/dev/null; then
+            echo "::error::curl -sf succeeded against a 503. The fix does not work"; exit 1
+          fi
+          echo "curl -sf  exit non-zero against HTTP 503  <- the fix"
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs ci-app || true
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f ci-app ci-broken 2>/dev/null || true
+
+  # -------------------------------------------------------------------------
+  config:
+    name: validate observability and k8s config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prometheus config and alert rules
+        # promtool parses these the same way Prometheus does at startup. A
+        # typo in a PromQL expression is otherwise discovered by an alert
+        # silently never firing, which is the worst way to discover it.
+        run: |
+          docker run --rm -v "$PWD/observability:/o" --entrypoint promtool \
+            prom/prometheus:v2.53.0 check config /o/prometheus/prometheus.yml
+          docker run --rm -v "$PWD/observability:/o" --entrypoint promtool \
+            prom/prometheus:v2.53.0 check rules /o/prometheus/alert_rules.yml
+
+      - name: Alertmanager config
+        run: |
+          docker run --rm -v "$PWD/observability:/o" --entrypoint amtool \
+            prom/alertmanager:v0.27.0 check-config /o/alertmanager/alertmanager.yml
+
+      - name: Docker Compose file
+        # `config` renders and validates the file, catching bad indentation
+        # and unknown keys without starting anything.
+        run: docker compose -f observability/docker-compose.yml config --quiet
+
+      - name: Kubernetes manifests
+        # kubeconform validates against the real upstream OpenAPI schemas,
+        # a genuine check that the fields exist and have the right types, not
+        # just that the YAML parses.
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -summary \
+            -schema-location default \
+            -ignore-missing-schemas \
+            k8s/namespace.yaml k8s/configmap.yaml k8s/deployment.yaml \
+            k8s/service.yaml k8s/hpa.yaml
+
+      - name: Grafana dashboard is valid JSON
+        run: python -c "import json,sys; json.load(open('observability/grafana/dashboards/soundcheck.json')); print('dashboard OK')"

@@ -1,0 +1,257 @@
+{
+  "uid": "soundcheck",
+  "title": "soundcheck: deploy, health, rollback",
+  "tags": ["soundcheck", "sre"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "name": "Deploys",
+        "datasource": { "type": "prometheus", "uid": "soundcheck-prometheus" },
+        "enable": true,
+        "iconColor": "blue",
+        "expr": "changes(soundcheck_start_time_seconds[1m]) > 0",
+        "titleFormat": "process restarted",
+        "textFormat": "a deploy, a rollback or a crash: cross-check the deploy log panel"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Live version",
+      "description": "Read from the soundcheck_app_info label. A version is a string and Prometheus stores only floats, so the value is a constant 1 and the interesting part rides in the label. That is the standard info-metric pattern.",
+      "datasource": { "type": "prometheus", "uid": "soundcheck-prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "name",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "soundcheck_app_info",
+          "legendFormat": "{{version}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Scrape health",
+      "description": "The `up` series is synthesised by Prometheus for every target: 1 when the last scrape succeeded. It is the only signal still present when the app is gone entirely, which is what makes it the one that can report the app being gone entirely.",
+      "datasource": { "type": "prometheus", "uid": "soundcheck-prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        { "refId": "A", "expr": "up{job=\"soundcheck-app\"}", "instant": true }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Success rate (5m)",
+      "description": "The rate()-based figure the alert rule uses: the fraction of requests in the last five minutes that succeeded. Not the app's lifetime average, which barely moves during an outage on a long-lived process.",
+      "datasource": { "type": "prometheus", "uid": "soundcheck-prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 95 },
+              { "color": "green", "value": 99 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum(rate(soundcheck_requests_total{result=\"success\",route!=\"<unmatched>\"}[5m])) / clamp_min(sum(rate(soundcheck_requests_total{route!=\"<unmatched>\"}[5m])), 0.0001)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Uptime since last deploy",
+      "description": "Resets to zero on every deploy and every restart. A number that keeps resetting on its own is a crash loop.",
+      "datasource": { "type": "prometheus", "uid": "soundcheck-prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "decimals": 0 },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "none",
+        "graphMode": "area"
+      },
+      "targets": [
+        { "refId": "A", "expr": "soundcheck_uptime_seconds" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Health over time",
+      "description": "Scrape success as a line. Every deploy produces a short notch here while the container is recreated. That gap is why the SoundcheckAppDown alert has a `for: 1m` clause instead of firing on the first zero.",
+      "datasource": { "type": "prometheus", "uid": "soundcheck-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20, "lineWidth": 2 }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "up{job=\"soundcheck-app\"}", "legendFormat": "up" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by result",
+      "description": "rate() over the raw counters, not the counters themselves. A counter resets to 0 whenever the process restarts, so the raw value is meaningless across a deploy; rate() understands resets and reports the per-second increase.",
+      "datasource": { "type": "prometheus", "uid": "soundcheck-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "error" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route, result) (rate(soundcheck_requests_total[5m]))",
+          "legendFormat": "{{route}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Success rate vs the 95% alert threshold",
+      "description": "The same expression the SoundcheckLowSuccessRate rule evaluates, drawn against its threshold. Being able to see the rule's own input is what makes an alert trustworthy rather than mysterious.",
+      "datasource": { "type": "prometheus", "uid": "soundcheck-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 105,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 95 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum(rate(soundcheck_requests_total{result=\"success\",route!=\"<unmatched>\"}[5m])) / clamp_min(sum(rate(soundcheck_requests_total{route!=\"<unmatched>\"}[5m])), 0.0001)",
+          "legendFormat": "success rate (5m)"
+        }
+      ]
+    },
+    {
+      "type": "logs",
+      "title": "Deploy log: showtime / encore events",
+      "description": "The JSON lines showtime.sh and encore.sh append to deploy_history.log, shipped by Promtail. This is the panel that answers 'what changed just before the graph on the left went sideways'.",
+      "datasource": { "type": "loki", "uid": "soundcheck-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "soundcheck-loki" },
+          "expr": "{job=\"deploy-history\"}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "type": "logs",
+      "title": "Failed deploys and rollbacks only",
+      "description": "The same stream filtered by label. `result` was promoted to a label in the Promtail pipeline precisely so this filter is an index lookup rather than a scan.",
+      "datasource": { "type": "loki", "uid": "soundcheck-loki" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 21 },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "soundcheck-loki" },
+          "expr": "{job=\"deploy-history\", result=\"failure\"} or {job=\"deploy-history\", action=~\"rollback|auto_rollback_triggered\"}",
+          "queryType": "range"
+        }
+      ]
+    }
+  ]
+}

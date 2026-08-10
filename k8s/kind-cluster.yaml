@@ -1,0 +1,48 @@
+# ===========================================================================
+# Kind cluster definition
+# ===========================================================================
+#   kind create cluster --config k8s/kind-cluster.yaml
+#   kind delete cluster --name soundcheck
+#
+# WHY KIND, AND WHY NOT THE SAME TOOL AS ensemble:
+#
+# Kind is "Kubernetes IN Docker": each node is a container on this laptop.
+# It needs no VM, no cloud account and no money, and deleting it leaves
+# nothing behind. That makes it right for a repo whose point is that the
+# Kubernetes mode can be reproduced by anyone reading it, in two minutes,
+# offline.
+#
+# ensemble runs K3s on an Oracle Cloud VM instead. Using a different tool
+# there is deliberate: these are genuinely two different setups demonstrating
+# two different skills, not one cluster reused across two repos. Here the
+# operations are IMPERATIVE: kubectl apply, kubectl rollout, run by a human
+# or a script, which is what teaches you what the orchestrator is doing.
+# There they are DECLARATIVE: the desired state is committed to Git and
+# ArgoCD reconciles it continuously, which is what you actually want in
+# production and a different lesson entirely.
+#
+# Deliberately NOT here: ArgoCD, Helm charts of my own, Terraform. Those are
+# ensemble's `conductor` and `tuning` layers, and duplicating them would blur
+# the boundary the two repos exist to draw.
+# ===========================================================================
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: soundcheck
+
+nodes:
+  - role: control-plane
+    # extraPortMappings publishes a port from the node container to the host,
+    # which is how a NodePort Service becomes reachable at localhost without
+    # an Ingress controller or a port-forward. 30080 is inside the default
+    # NodePort range (30000-32767); the API server rejects anything outside it.
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+
+  # Two workers, so the RollingUpdate in deployment.yaml actually schedules
+  # replicas across separate nodes and `kubectl get pods -o wide` shows
+  # something worth looking at. A single-node cluster hides every placement
+  # decision the scheduler makes.
+  - role: worker
+  - role: worker

@@ -1,0 +1,63 @@
+# ===========================================================================
+# Prometheus scrape configuration
+# ===========================================================================
+# Prometheus pulls. Every `scrape_config` below is a standing instruction to
+# go and fetch an HTTP endpoint on a timer and store whatever numbers come
+# back, stamped with the labels defined here.
+# ===========================================================================
+
+global:
+  # How often to pull. 15s is the usual starting point: fast enough that a
+  # short incident produces several data points, slow enough that a year of
+  # history is not a storage project. It also sets the floor for how quickly
+  # anything can be detected: a rule cannot see a change sooner than the
+  # scrape that carries it.
+  scrape_interval: 15s
+  # How often the alerting rules are re-evaluated. Kept equal to the scrape
+  # interval so a rule never runs twice on identical data.
+  evaluation_interval: 15s
+  external_labels:
+    monitor: soundcheck
+
+# Where firing alerts are sent. Prometheus decides an alert is firing;
+# Alertmanager decides who hears about it.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["soundcheck-alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  # -------------------------------------------------------------------------
+  # The application
+  # -------------------------------------------------------------------------
+  - job_name: soundcheck-app
+    # The default is /metrics, and the app serves JSON there for the shell
+    # script and the tests. Prometheus cannot read JSON. It speaks exactly
+    # one text exposition format, so it is pointed at the endpoint that
+    # speaks it. `metrics_path` existing at all is why adding a second
+    # endpoint was the right move instead of changing the first one.
+    metrics_path: /metrics/prometheus
+    scrape_interval: 10s
+    static_configs:
+      # `soundcheck-app` is a Docker network alias, not a hostname anyone
+      # configured. showtime.sh joins each new container to soundcheck-net
+      # with that alias, so the name keeps resolving across deploys even
+      # though the container behind it is destroyed and recreated every time.
+      # This is service discovery in its simplest honest form.
+      - targets: ["soundcheck-app:8080"]
+        labels:
+          service: soundcheck
+          env: local
+
+  # -------------------------------------------------------------------------
+  # Prometheus scraping itself
+  # -------------------------------------------------------------------------
+  # Not vanity: `up`, scrape durations and rule evaluation failures come from
+  # here. Without it, a broken Prometheus looks exactly like a healthy system
+  # with nothing happening.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -1,0 +1,42 @@
+# ===========================================================================
+# Service: a stable name in front of Pods that keep being replaced
+# ===========================================================================
+# Pods are cattle: every deploy destroys them and creates new ones with new
+# IPs. A Service is a fixed name and virtual IP that always points at whatever
+# Pods currently match its selector, so nothing else has to care.
+#
+# The link to the probes in deployment.yaml is the important part: the
+# endpoint list behind this Service contains exactly the Pods whose
+# readinessProbe is passing. That is the entire mechanism. "Removed from
+# rotation" is not a separate feature: it is a readiness probe failing.
+#
+# ClusterIP (the default) means in-cluster only. Reaching it from a laptop is
+# a deliberate extra step:
+#     kubectl -n soundcheck port-forward svc/soundcheck 8080:80
+# Kind can also publish a NodePort through an extraPortMapping. See
+# k8s/kind-cluster.yaml. Neither is an Ingress, and this repo does not add
+# one: routing and TLS are platform concerns, which is ensemble's territory.
+# ===========================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: soundcheck
+  namespace: soundcheck
+  labels:
+    app.kubernetes.io/name: soundcheck
+    app.kubernetes.io/part-of: soundcheck
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "80"
+    prometheus.io/path: "/metrics/prometheus"
+spec:
+  type: ClusterIP
+  selector:
+    # Matches the Pod template labels, NOT the Deployment's own labels. A
+    # Service selects Pods directly; it has no idea a Deployment exists.
+    app.kubernetes.io/name: soundcheck
+  ports:
+    - name: http
+      port: 80          # the port the Service listens on
+      targetPort: http  # the named container port from deployment.yaml
+      protocol: TCP

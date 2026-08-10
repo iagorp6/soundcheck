@@ -1,0 +1,75 @@
+# ===========================================================================
+# Alertmanager configuration
+# ===========================================================================
+# Prometheus answers "is something wrong?". Alertmanager answers "who should
+# hear about it, how often, and grouped with what?". They are separate
+# processes because those are separate jobs: you frequently want to silence a
+# notification for four hours without touching the rule that generates it.
+#
+# NOTHING IS ACTUALLY DELIVERED HERE, on purpose. There is no Slack workspace
+# or SMTP server behind this repo, and configuring a fake one would be
+# decoration rather than a demonstration. Firing alerts are fully visible at
+# http://localhost:9093 and via the Prometheus /alerts page. The routing,
+# grouping and inhibition logic below is real and does run. Delivery is one
+# block of config away, and the commented example shows exactly which one.
+# ===========================================================================
+
+route:
+  # --- Grouping ------------------------------------------------------------
+  # Alerts that share these label values become ONE notification. Grouping by
+  # alertname and severity means twenty instances failing the same check
+  # produce one message with twenty entries, not twenty messages. This is the
+  # difference between an alerting system and a denial-of-service on your own
+  # attention.
+  group_by: ["alertname", "severity"]
+
+  # Wait this long after the first alert in a new group before sending, to
+  # give its siblings a chance to arrive and be included.
+  group_wait: 30s
+  # Minimum gap before sending an UPDATE about a group that already notified.
+  group_interval: 5m
+  # How long before re-sending an alert that is still firing. Long, because
+  # the purpose is "you have not forgotten this, have you?", not nagging.
+  repeat_interval: 4h
+
+  receiver: default
+
+  routes:
+    # Informational alerts (the deploy feed) must never share a channel with
+    # pages. Matched first and given a much longer repeat interval.
+    - matchers:
+        - severity = "info"
+      receiver: deploy-feed
+      group_wait: 10s
+      repeat_interval: 24h
+
+receivers:
+  - name: default
+    # No integrations configured: see the header. To make this deliver, add
+    # a block like this one:
+    #
+    # slack_configs:
+    #   - api_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+    #     channel: "#alerts"
+    #     title: '{{ .CommonAnnotations.summary }}'
+    #     text: '{{ .CommonAnnotations.description }}'
+    #
+    # In a real repo that URL is a secret and does not belong in Git,
+    # ensemble's `backstage` layer handles that case with SOPS-encrypted
+    # values committed safely.
+
+  - name: deploy-feed
+
+# --- Inhibition ------------------------------------------------------------
+# When the whole app is down, its success rate is also going to look wrong.
+# Sending both is noise: the second alert tells you nothing the first did not,
+# and it arrives at the worst possible moment. This rule suppresses the
+# warning while the critical one is firing.
+inhibit_rules:
+  - source_matchers:
+      - alertname = "SoundcheckAppDown"
+    target_matchers:
+      - alertname = "SoundcheckLowSuccessRate"
+    # Only inhibit within the same service, and never let one service's outage
+    # silence a different service's warning.
+    equal: ["monitor"]

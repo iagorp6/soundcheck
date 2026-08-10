@@ -1,0 +1,10 @@
+# A namespace of its own, so `kubectl delete namespace soundcheck` is a
+# complete, reliable undo of everything this repo created in the cluster.
+# Deploying demos into `default` is how clusters end up with objects nobody
+# can account for six months later.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: soundcheck
+  labels:
+    app.kubernetes.io/part-of: soundcheck

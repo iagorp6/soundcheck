@@ -1,2 +1,6 @@
-pytest==7.4.0
+# Pinned to match app/requirements.txt. They used to disagree (7.4.0 here,
+# 8.2.0 there), which means CI and a local run could execute the suite on two
+# different pytest versions and disagree about the result.
+pytest==8.2.0
 flask==2.3.0
+werkzeug==2.3.8

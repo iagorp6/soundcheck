@@ -1,0 +1,14 @@
+{"ts":"2026-08-04T09:12:03Z","action":"deploy_started","tool":"showtime","mode":"docker","version":"1.0.0","strategy":"blue-green","auto_rollback":"0"}
+{"ts":"2026-08-04T09:12:41Z","action":"deploy","tool":"showtime","mode":"docker","version":"1.0.0","result":"success","port":"8080"}
+{"ts":"2026-08-05T14:03:11Z","action":"deploy_started","tool":"showtime","mode":"docker","version":"1.1.0","strategy":"blue-green","auto_rollback":"0"}
+{"ts":"2026-08-05T14:03:52Z","action":"deploy","tool":"showtime","mode":"docker","version":"1.1.0","result":"success","port":"8080"}
+{"ts":"2026-08-06T10:47:02Z","action":"deploy_started","tool":"showtime","mode":"docker","version":"1.2.0","strategy":"blue-green","auto_rollback":"1"}
+{"ts":"2026-08-06T10:47:33Z","action":"deploy","tool":"showtime","mode":"docker","version":"1.2.0","result":"failure","stage":"candidate_health"}
+{"ts":"2026-08-06T11:20:18Z","action":"deploy_started","tool":"showtime","mode":"docker","version":"1.2.1","strategy":"blue-green","auto_rollback":"1"}
+{"ts":"2026-08-06T11:20:59Z","action":"deploy","tool":"showtime","mode":"docker","version":"1.2.1","result":"failure","stage":"post_cutover_health"}
+{"ts":"2026-08-06T11:21:00Z","action":"auto_rollback_triggered","tool":"showtime","mode":"docker","failed_version":"1.2.1"}
+{"ts":"2026-08-06T11:21:02Z","action":"rollback_started","tool":"encore","mode":"docker","target":"1.1.0","from":"1.2.1"}
+{"ts":"2026-08-06T11:21:19Z","action":"rollback","tool":"encore","mode":"docker","target":"1.1.0","result":"success"}
+{"ts":"2026-08-07T08:31:44Z","action":"deploy_started","tool":"showtime","mode":"k8s","version":"1.2.2","strategy":"rolling-update","auto_rollback":"0"}
+{"ts":"2026-08-07T08:32:26Z","action":"deploy","tool":"showtime","mode":"k8s","version":"1.2.2","result":"success","namespace":"soundcheck"}
+{"ts":"2026-08-07T08:32:27Z","action":"retention_prune","tool":"showtime","mode":"k8s","version":"1.0.0","result":"success"}

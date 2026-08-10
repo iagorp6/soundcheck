@@ -1,0 +1,123 @@
+# ===========================================================================
+# Alerting rules
+# ===========================================================================
+# This file is the "real" version of the success-rate check that soundcheck.sh
+# also does in shell. Both are kept, and the difference between them is the
+# lesson:
+#
+#   soundcheck.sh reads success_rate_percent, a LIFETIME average the app
+#   computes since its process started. After a week of uptime, an outage that
+#   fails every single request for ten minutes barely dents that number,
+#   because the denominator is a week of successes. The check is honest but
+#   nearly deaf.
+#
+#   The rule below uses rate() over a five-minute window: "of the requests in
+#   the last five minutes, what fraction failed?" That reacts in five minutes
+#   regardless of how long the process has been up, and it is the reason
+#   Prometheus stores counters rather than pre-computed percentages. Let the
+#   app count; let the query decide the window.
+#
+# Keep the shell check anyway: it needs nothing but curl and works when this
+# stack is not running. It is the torch in the drawer, not the lighting rig.
+# ===========================================================================
+
+groups:
+  - name: soundcheck
+    # How often the rules in this group are evaluated. Inherited from
+    # global.evaluation_interval when omitted; stated here for clarity.
+    interval: 15s
+    rules:
+      # ---------------------------------------------------------------------
+      # The service is not answering scrapes at all
+      # ---------------------------------------------------------------------
+      # `up` is synthesised by Prometheus itself for every target: 1 if the
+      # last scrape succeeded, 0 if it did not. It is the one metric that
+      # still exists when the application is completely gone, which makes it
+      # the only thing that can tell you the application is completely gone.
+      - alert: SoundcheckAppDown
+        expr: up{job="soundcheck-app"} == 0
+        # `for` is what separates an alert from a twitch. The condition has to
+        # hold continuously for a minute before it fires, so a single missed
+        # scrape during a deploy does not page anyone. Every deploy briefly
+        # trips this expression by design, and that is precisely what `for`
+        # exists to absorb.
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "soundcheck app is not responding to scrapes"
+          description: >-
+            Prometheus has failed to scrape {{ $labels.instance }} for over a
+            minute. Either the container is gone, or it is not on the
+            soundcheck-net network. Check `docker ps` and `./soundcheck.sh`.
+
+      # ---------------------------------------------------------------------
+      # THE rule: success rate over a moving window
+      # ---------------------------------------------------------------------
+      # Reading the expression outward:
+      #   rate(...[5m])          per-second average increase of the counter
+      #                          over 5 minutes. Handles counter resets on
+      #                          restart correctly, which a raw subtraction
+      #                          would not.
+      #   sum(...)               collapse the label dimensions into one number
+      #   success / total * 100  the percentage
+      #
+      # The `> 0` guard on the denominator matters: with no traffic at all,
+      # both rates are zero and the division is 0/0 = NaN, which compares
+      # false and quietly makes the alert unfirable rather than obviously
+      # broken. Requiring some traffic keeps the alert honest about when it
+      # actually has an opinion.
+      #
+      # In practice the denominator is never zero, because the app counts its
+      # own health checks. That is deliberate: an idle service still gets
+      # probed, so there is always a live signal, and a health endpoint
+      # starting to fail moves this number rather than being filtered out as
+      # "not real traffic". Prometheus scrapes are the only requests excluded,
+      # since a fixed 6-per-minute background rate would dilute everything.
+      #
+      # `route!="<unmatched>"` keeps 404s out of the SERVICE's error rate. A
+      # scanner walking random URLs is not the application failing, and
+      # letting it page someone is how alerts get muted. The 404s are still
+      # counted and still visible; they just do not belong in this question.
+      - alert: SoundcheckLowSuccessRate
+        expr: |
+          (
+            sum(rate(soundcheck_requests_total{result="success",route!="<unmatched>"}[5m]))
+            /
+            sum(rate(soundcheck_requests_total{route!="<unmatched>"}[5m]))
+          ) * 100 < 95
+          and
+          sum(rate(soundcheck_requests_total{route!="<unmatched>"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "success rate below 95% over the last 5 minutes"
+          description: >-
+            {{ $value | printf "%.1f" }}% of requests in the last 5 minutes
+            succeeded, under the 95% threshold, for at least 2 minutes.
+            This is the rate()-based version of the check soundcheck.sh does
+            against a lifetime average.
+
+      # ---------------------------------------------------------------------
+      # A deploy just happened
+      # ---------------------------------------------------------------------
+      # Not a problem, and severity says so: this is an INFORMATIONAL alert,
+      # which is a legitimate thing to have. Routed to a low-priority receiver
+      # in alertmanager.yml, it becomes a deploy feed rather than a page.
+      #
+      # changes() counts how many times the value changed in the window.
+      # start_time_seconds changes only when the process restarts, so this
+      # reads as "a new process started in the last 10 minutes", which for a
+      # deploy tool means a deploy, a rollback, or a crash loop. All three are
+      # worth seeing next to the graphs.
+      - alert: SoundcheckVersionChanged
+        expr: changes(soundcheck_start_time_seconds[10m]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "soundcheck restarted or was redeployed"
+          description: >-
+            The process start time changed in the last 10 minutes. Cross-check
+            deploy_history.log in Loki for the version and the result.

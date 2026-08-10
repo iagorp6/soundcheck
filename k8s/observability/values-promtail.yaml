@@ -1,0 +1,46 @@
+# ===========================================================================
+# Helm values for grafana/promtail
+# ===========================================================================
+# Promtail runs as a DaemonSet here: one Pod per node, tailing that node's
+# container log files. That is the structural difference from the Compose
+# setup, where a single Promtail talked to one Docker daemon.
+#
+# What is NOT collected in this mode, and it is worth being explicit about:
+# deploy_history.log lives on the laptop, not in the cluster, so `showtime.sh
+# --k8s` events do not reach Loki this way. Two honest options, neither
+# pretended away:
+#   - keep running the Compose Promtail alongside, pointed at the same Loki
+#   - or ship the file with a sidecar, which means putting a laptop file into
+#     a cluster, which is a worse idea than it sounds
+# The Kubernetes mode's own deploy record is `kubectl rollout history`.
+# ===========================================================================
+
+fullnameOverride: soundcheck-promtail
+
+config:
+  clients:
+    - url: http://soundcheck-loki.observability.svc.cluster.local:3100/loki/api/v1/push
+
+  snippets:
+    # Only ship logs from this app's namespace. The default DaemonSet config
+    # collects every Pod on every node, including Loki's own, which then logs
+    # about ingesting its own logs.
+    pipelineStages:
+      - cri: {}
+      - json:
+          expressions:
+            event: event
+            status: status
+            version: version
+          drop_malformed: false
+      - labels:
+          event:
+
+    extraRelabelConfigs:
+      - source_labels: [__meta_kubernetes_namespace]
+        regex: soundcheck
+        action: keep
+
+resources:
+  requests: { cpu: 20m, memory: 64Mi }
+  limits: { memory: 128Mi }
