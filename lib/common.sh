@@ -252,9 +252,16 @@ sc_event() {
 # tool: the one tool you want to work on a broken box at 3am with nothing
 # installed. If jq IS available we use it, because it is correct; the grep
 # path is the fallback, not the plan.
+#
+# SC_NO_JQ=1 forces the fallback even where jq exists. It is there so the
+# fallback is REACHABLE IN A TEST: on any machine with jq installed, the
+# grep/sed branch would otherwise never execute, and the test asserting the
+# two agree would quietly skip. That is how the parity check sat green for a
+# while having never once run. A branch that only executes on other people's
+# machines needs a way to be executed on yours.
 sc_history_versions() {
     [ -f "$HISTORY_FILE" ] || return 0
-    if command -v jq >/dev/null 2>&1; then
+    if [ -z "${SC_NO_JQ:-}" ] && command -v jq >/dev/null 2>&1; then
         jq -r 'select(.action=="deploy" and .result=="success") | .version' \
             "$HISTORY_FILE" 2>/dev/null | sc_reverse_lines | awk '!seen[$0]++'
     else

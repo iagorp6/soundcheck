@@ -34,12 +34,14 @@ VERBOSE=0
 # --- Harness ---------------------------------------------------------------
 TESTS_RUN=0
 TESTS_FAILED=0
+TESTS_SKIPPED=0
 CURRENT=""
 
 if [ -t 1 ]; then
-    T_GREEN=$'\033[0;32m'; T_RED=$'\033[0;31m'; T_DIM=$'\033[2m'; T_OFF=$'\033[0m'
+    T_GREEN=$'\033[0;32m'; T_RED=$'\033[0;31m'
+    T_YELLOW=$'\033[0;33m'; T_DIM=$'\033[2m'; T_OFF=$'\033[0m'
 else
-    T_GREEN=''; T_RED=''; T_DIM=''; T_OFF=''
+    T_GREEN=''; T_RED=''; T_YELLOW=''; T_DIM=''; T_OFF=''
 fi
 
 it() {
@@ -56,6 +58,19 @@ fail() {
 pass() {
     [ "$VERBOSE" = 1 ] && printf '%s  ok%s %s\n' "$T_GREEN" "$T_OFF" "$CURRENT"
     return 0
+}
+
+# skip <reason>
+#
+# Prints regardless of -v, deliberately. A case that cannot run here has to be
+# louder than one that passed, not quieter. Calling `pass` when a dependency
+# is missing is how the jq parity check reported green for its entire life
+# without ever executing: the suite said 38 passed, and one of them was a
+# branch that had never run on this machine.
+skip() {
+    printf '%s  ..%s %s (skipped: %s)\n' "$T_YELLOW" "$T_OFF" "$CURRENT" "$1"
+    TESTS_RUN=$((TESTS_RUN - 1))
+    TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
 }
 
 assert_eq() {
@@ -158,7 +173,7 @@ if sc_has_python; then
         | sc_python -c 'import sys,json; print(json.load(sys.stdin)["v"])' 2>/dev/null)"
     assert_eq "$parsed" "$nasty"
 else
-    pass  # no working Python: the assertions above still cover the mechanics
+    skip "no working Python 3"
 fi
 
 # ===========================================================================
@@ -252,22 +267,27 @@ it "sc_history_versions is empty for an empty file"
 HISTORY_FILE="$(new_history)"
 assert_eq "$(sc_history_versions)" ""
 
-it "sc_history_versions agrees with itself with and without jq"
-# The jq path and the grep/sed fallback must return the same answer, or a box
-# without jq rolls back somewhere different from a box with it. That is the
-# worst kind of bug: it only appears on the machine you are not testing on.
+it "the grep/sed fallback parses history correctly on its own"
+# Asserted against a hard expectation, not against the jq path, so this runs
+# and means something on every machine including ones with jq installed.
+#
+# The first version of this test forced the fallback with `PATH=/nonexistent`,
+# which does hide jq, and also hides grep, sed and awk, so the fallback had
+# nothing to run with and returned empty. It passed anyway on the machine it
+# was written on, because that machine has no jq and the whole case was inside
+# an `if command -v jq` that skipped. It failed the moment CI ran it on a box
+# that has jq. A skipped test reports the same colour as a passing one.
+seed_history
+assert_eq "$(SC_NO_JQ=1 sc_history_versions)" "$(printf '1.1.0\n1.0.0')"
+
+it "the jq path and the fallback agree"
+# The two must return the same answer, or a box without jq rolls back to a
+# different version than a box with it, which is the worst kind of bug:
+# it only appears on the machine you are not testing on.
 if command -v jq >/dev/null 2>&1; then
-    seed_history
-    with_jq="$(sc_history_versions)"
-    # Force the fallback by hiding jq from PATH for one call.
-    without_jq="$(PATH=/nonexistent bash -c "
-        HISTORY_FILE='${HISTORY_FILE}'
-        . '${REPO_ROOT}/lib/common.sh'
-        sc_history_versions
-    " 2>/dev/null)"
-    assert_eq "$without_jq" "$with_jq"
+    assert_eq "$(sc_history_versions)" "$(SC_NO_JQ=1 sc_history_versions)"
 else
-    pass  # only the fallback exists here, and it is covered above
+    skip "jq not installed, so there is no second implementation to compare"
 fi
 
 # ===========================================================================
@@ -438,13 +458,19 @@ if command -v curl >/dev/null 2>&1 && start_server; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
 else
-    printf '%sskipping HTTP tests: need curl and a working Python 3%s\n' "$T_DIM" "$T_OFF"
+    CURRENT="HTTP tests (7 cases, including the curl -s vs -sf proof)"
+    skip "need curl and a working Python 3"
 fi
 
 # ===========================================================================
 # Report
 # ===========================================================================
 printf '\n'
+# Skips are reported next to the pass count, never folded into it. "38 passed"
+# meaning "37 passed and one never ran" is the exact failure this suite exists
+# to argue against.
+[ "$TESTS_SKIPPED" -gt 0 ] \
+    && printf '%s%d skipped%s\n' "$T_YELLOW" "$TESTS_SKIPPED" "$T_OFF"
 if [ "$TESTS_FAILED" -eq 0 ]; then
     printf '%s%d passed%s\n' "$T_GREEN" "$TESTS_RUN" "$T_OFF"
     exit 0
