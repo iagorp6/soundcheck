@@ -38,6 +38,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run shellcheck on every script
+        # The version is printed because it matters. The runner ships 0.9.0,
+        # and a local container run may not: the two disagree on the code for
+        # an unreachable trap handler (SC2317 vs SC2329), which is enough for
+        # a file that lints clean on a laptop to fail here. When that happens,
+        # prefer restructuring the code over adding a version-specific
+        # directive, since a directive only silences the version you tested.
         # -x follows `source` directives, so lib/common.sh is analysed in the
         # context of the scripts that use it: without it, every variable
         # defined there looks undefined to the checker.

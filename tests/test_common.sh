@@ -115,9 +115,15 @@ HISTORY_FILE="$(new_history)"
 export SC_TOOL="test"
 export SC_MODE="docker"
 
-# shellcheck disable=SC2329  # invoked by the EXIT trap on the next line
-cleanup() { rm -f "${TMPDIR:-/tmp}"/soundcheck-history-* 2>/dev/null || true; }
-trap cleanup EXIT
+# Cleanup is inlined into the trap rather than kept in a named function.
+#
+# A function only ever invoked by a trap looks unreachable to static analysis,
+# and the two versions in play disagree about what to call that: 0.9.0, which
+# the CI runner ships, reports SC2317, while newer builds report SC2329. A
+# directive naming one leaves the other failing, which is how this line went
+# red in CI after passing locally. No function, nothing to call unreachable,
+# nothing to suppress on either version.
+trap 'rm -f "${TMPDIR:-/tmp}"/soundcheck-history-* 2>/dev/null || true' EXIT
 
 printf '%srunning shell tests against %s%s\n\n' "$T_DIM" "${REPO_ROOT}/lib/common.sh" "$T_OFF"
 
