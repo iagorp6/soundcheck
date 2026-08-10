@@ -147,8 +147,12 @@ jobs:
           exit 1
 
       - name: Health and metrics endpoints answer
+        # Whitespace-tolerant on purpose. Flask stopped pretty-printing jsonify
+        # output by default in 2.2, so the response is compact and an assertion
+        # written as '"status": "healthy"' never matches. Asserting on exact
+        # JSON formatting is testing the serializer's mood, not the endpoint.
         run: |
-          curl -sf http://localhost:8080/health  | grep -q '"status": "healthy"'
+          curl -sf http://localhost:8080/health  | grep -qE '"status":[[:space:]]*"healthy"'
           curl -sf http://localhost:8080/metrics | grep -q success_rate_percent
 
       - name: Prometheus exposition is well formed
@@ -213,11 +217,20 @@ jobs:
         # promtool parses these the same way Prometheus does at startup. A
         # typo in a PromQL expression is otherwise discovered by an alert
         # silently never firing, which is the worst way to discover it.
+        #
+        # Mounted at /etc/prometheus, not at an arbitrary path, because
+        # prometheus.yml refers to its rules as /etc/prometheus/alert_rules.yml
+        # and `check config` follows rule_files for real. Mounting elsewhere
+        # made it fail with "does not point to an existing file" while the
+        # config was perfectly valid. Using the deployed layout means the
+        # check exercises the same paths the container will.
         run: |
-          docker run --rm -v "$PWD/observability:/o" --entrypoint promtool \
-            prom/prometheus:v2.53.0 check config /o/prometheus/prometheus.yml
-          docker run --rm -v "$PWD/observability:/o" --entrypoint promtool \
-            prom/prometheus:v2.53.0 check rules /o/prometheus/alert_rules.yml
+          docker run --rm -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v2.53.0 \
+            check config /etc/prometheus/prometheus.yml
+          docker run --rm -v "$PWD/observability/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v2.53.0 \
+            check rules /etc/prometheus/alert_rules.yml
 
       - name: Alertmanager config
         run: |
