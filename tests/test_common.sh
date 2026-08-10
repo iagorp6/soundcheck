@@ -102,12 +102,20 @@ new_history() { mktemp "${TMPDIR:-/tmp}/soundcheck-history-XXXXXX"; }
 # the developer's real deploy_history.log.
 export HISTORY_FILE
 HISTORY_FILE="$(new_history)"
-# shellcheck source=../lib/common.sh
+# Path relative to the repo root, which is where CI invokes this from, so the
+# linter can follow it with -x and check both files together. Note that any
+# comment line STARTING with the word below is parsed as a directive, so
+# prose about it has to be worded around that.
+# shellcheck source=lib/common.sh
 . "${REPO_ROOT}/lib/common.sh"
 
-SC_TOOL="test"
-SC_MODE="docker"
+# Exported rather than merely assigned: they are read by sc_event inside the
+# sourced library and by the sub-shells the config tests spawn, so a plain
+# assignment would be both invisible to shellcheck and wrong for the subshells.
+export SC_TOOL="test"
+export SC_MODE="docker"
 
+# shellcheck disable=SC2329  # invoked by the EXIT trap on the next line
 cleanup() { rm -f "${TMPDIR:-/tmp}"/soundcheck-history-* 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -317,7 +325,15 @@ config_probe() {
     mkdir -p "${tmpdir}/config" "${tmpdir}/lib"
     cp "${REPO_ROOT}/lib/common.sh" "${tmpdir}/lib/"
     printf 'RETENTION_COUNT=3\nLOG_FORMAT=text\n' >"${tmpdir}/config/retention.env"
-    env -i PATH="$PATH" HOME="$HOME" $1 bash -c "
+
+    # The first argument is a space-separated list of VAR=value pairs that has
+    # to reach `env` as SEPARATE words. Splitting it into an array says that
+    # explicitly, where a bare unquoted $1 would look identical to the
+    # accidental word-splitting shellcheck is right to warn about.
+    local -a envs=()
+    [ -n "$1" ] && read -ra envs <<<"$1"
+
+    env -i PATH="$PATH" HOME="$HOME" "${envs[@]}" bash -c "
         . '${tmpdir}/lib/common.sh'
         $2
         sc_load_config
@@ -375,8 +391,9 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 ' "$PORT" >/dev/null 2>&1 &
     SERVER_PID=$!
-    local i
-    for i in $(seq 1 40); do
+    # `_` rather than `i`: the counter is never read, and naming it `_` says
+    # so to both a reader and to shellcheck.
+    for _ in $(seq 1 40); do
         # intentional-plain-curl: "is anything listening yet", where a 503
         # would still mean yes. -f would make the readiness probe for the
         # test server itself depend on the status code it returns.

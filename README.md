@@ -399,9 +399,32 @@ the machine it was written on, in a code path that only misbehaves when `jq` is
 absent and Windows is present. That is exactly the kind of thing reading the
 code does not catch.
 
-The end-to-end Docker and Kind flows are written and reviewed but I have not yet
-recorded a clean run of them on this machine, and I would rather say that than
-imply otherwise.
+The Docker flow has been run end to end. What that run showed, in order:
+
+- `./showtime.sh 1.0.0` and `1.1.0` both went out blue-green, healthy on 8081
+  before the cutover.
+- A deliberately broken `1.2.0`, built with `HEALTH_FAIL=1`, served ten
+  consecutive 503s on the candidate port, was removed, and **`1.1.0` kept
+  serving 8080 throughout**. Exit code 2, no rollback needed. That is the
+  claim blue-green exists to make, and it is the one I most wanted to see
+  actually happen rather than assume.
+- `./encore.sh --list` showed `1.1.0` and `1.0.0` as targets and correctly
+  omitted the failed `1.2.0`. `./encore.sh 1.0.0` put it back.
+- The observability stack came up and Prometheus scraped
+  `soundcheck-app:8080` by network alias, target `up`, across containers it
+  did not create. All three alert rules loaded `health=ok`.
+- `sum(rate(soundcheck_requests_total[5m]))` returned a non-zero value.
+  Before the counting fix that expression was flat zero, which is exactly
+  what made the alert unfirable, so this is the number that proves the fix.
+- Loki ingested `deploy_history.log` with `action`, `version` and `result` as
+  labels, and `{job="deploy-history", result="failure"}` returned the real
+  failed `1.2.0` event.
+- Grafana provisioned both datasources and the 9-panel dashboard from files.
+
+shellcheck passes at `-S style` with `-x` across all six scripts.
+
+The Kubernetes flow is written and reviewed but has not been run against a
+live Kind cluster yet, and I would rather say that than imply otherwise.
 
 ## What I learned
 
@@ -435,8 +458,11 @@ rather than comments saying to be careful.
 ## What is next
 
 - A load generator, so the alert rule, the dashboard and the HPA have real
-  traffic to react to instead of a synthetic switch.
-- Actually run both flows end to end and put the output in here.
+  traffic to react to instead of a synthetic switch. Health checks alone give
+  the rate() expression a pulse, but not enough of one to watch it cross a
+  threshold.
+- Run the Kubernetes flow against a live Kind cluster, the way the Docker one
+  now has been.
 - The `metronome` bridge: this repo's Prometheus rules and dashboard are the
   single-service version of what `ensemble` runs at cluster scale. Keeping them
   genuinely shared rather than merely similar is the interesting part.

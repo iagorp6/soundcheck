@@ -147,8 +147,13 @@ sc_load_config() {
     if [ -f "$config_file" ]; then
         # `set -a` marks everything assigned while it is active for export, so
         # values reach the `docker run -e` calls and any child process too.
+        # The source is on its own line because a shellcheck directive applies
+        # to the next COMMAND, and `set -a; . file; set +a` on one line puts
+        # `set -a` there instead, leaving SC1090 unsilenced.
+        set -a
         # shellcheck source=/dev/null
-        set -a; . "$config_file"; set +a
+        . "$config_file"
+        set +a
     fi
 
     # Put the caller's environment back on top of whatever the file said.
