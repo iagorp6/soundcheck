@@ -20,6 +20,17 @@ spec:
   # RETENTION_COUNT in config/retention.env.
   revisionHistoryLimit: 5
 
+  # How long a rollout may make no progress before the Deployment flips its
+  # Progressing condition to False with reason ProgressDeadlineExceeded.
+  #
+  # The default is 600s. It is set to 120 here to match the `--timeout=120s`
+  # that showtime.sh --k8s passes to `kubectl rollout status`, so the deploy
+  # script and the cluster agree on when a rollout has failed. With the
+  # default, showtime would give up after two minutes while the Deployment
+  # still claimed to be progressing for another eight, and soundcheck.sh
+  # would report the wedged rollout as fine for that whole window.
+  progressDeadlineSeconds: 120
+
   selector:
     matchLabels:
       app.kubernetes.io/name: soundcheck
@@ -60,10 +71,20 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          # The tag here is a placeholder. showtime.sh --k8s overwrites it with
-          # `kubectl set image`, which is what creates a new revision. The
-          # imperative counterpart to ensemble's ArgoCD, where the image
-          # reference is committed to Git and a controller reconciles it.
+          # PLACEHOLDER. showtime.sh --k8s substitutes the real version into
+          # this line before applying, so the Deployment is never reconciled
+          # to a tag that does not exist. Applying the manifest verbatim and
+          # then correcting it with `kubectl set image` looks equivalent and
+          # is not: it rolls out the placeholder first, which costs a wasted
+          # revision and a real ImagePullBackOff on every single deploy.
+          #
+          # Applying this file by hand therefore tries to pull
+          # soundcheck-app:latest, which will not exist unless you tagged it
+          # yourself. That is the honest tradeoff. Pinning a real version in
+          # Git instead would go stale the moment anyone deploys, and an
+          # image reference living in Git with a controller reconciling it is
+          # the GitOps model, which is ensemble's `conductor` layer rather
+          # than this repo's. Here the version is an argument to a command.
           image: soundcheck-app:latest
           # IfNotPresent matters on Kind: `kind load docker-image` puts the
           # image into the node's own store, and Always would send the kubelet
@@ -79,6 +100,28 @@ spec:
                 name: soundcheck-config
 
           env:
+            # PLACEHOLDER, substituted by showtime.sh --k8s in the same pass
+            # that renders the image tag.
+            #
+            # It has to be set here rather than in the ConfigMap, because the
+            # version is a property of the artifact being deployed, not of the
+            # environment it is deployed into. Putting it in the ConfigMap
+            # would also mean a value that changes on every deploy living in a
+            # file whose whole point is that it does not.
+            #
+            # Without this the app falls back to its own default and reports
+            # 0.0.0-dev forever, which quietly breaks more than it looks like:
+            # soundcheck_app_info carries the version as a LABEL, so the
+            # Grafana "Live version" panel, and the deploy-detection that
+            # hangs off a version change, both go blind in Kubernetes mode
+            # while continuing to display something plausible.
+            #
+            # The placeholder is the app's own default on purpose, so applying
+            # this manifest by hand produces exactly the app's default rather
+            # than a literal like __VERSION__.
+            - name: APP_VERSION
+              value: "0.0.0-dev"
+
             # Surfaces the Pod name inside the app, so a log line can say
             # which replica produced it. The downward API is how a Pod reads
             # facts about itself without querying the API server.

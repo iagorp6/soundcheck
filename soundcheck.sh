@@ -54,8 +54,8 @@
 # EXIT CODES
 #   0  healthy
 #   1  usage error
-#   2  not answering, or answering with an HTTP error
-#   3  answering, but the success rate is below threshold
+#   2  not answering / Deployment not Available: the service cannot serve
+#   3  serving, but degraded: success rate low, or the rollout is wedged
 # ===========================================================================
 
 set -uo pipefail
@@ -81,7 +81,7 @@ usage: ./soundcheck.sh [flags]
   --json-log          emit JSON lines on the terminal too
   -h, --help          this text
 
-exit codes: 0 healthy · 1 usage · 2 down or erroring · 3 success rate low
+exit codes: 0 healthy · 1 usage · 2 down or not Available · 3 degraded or wedged
 EOF
 }
 
@@ -281,19 +281,91 @@ check_k8s() {
     sc_step "2/3 readiness"
     # A Pod's Ready condition is the aggregate of its containers' readiness
     # probes; this is the exact signal the Service uses to route traffic.
-    not_ready="$(kubectl -n "$K8S_NAMESPACE" get pods \
+    #
+    # TERMINATING PODS ARE EXCLUDED, and that exclusion is not cosmetic. A pod
+    # being deleted stops being Ready on its way out, which is correct and
+    # uninteresting: it has already been removed from the Service endpoints
+    # and something else is serving in its place. Counting it as a failure
+    # means this check reports a problem during every single rollout, because
+    # a rolling update always has one foot on each side. On a cron that is a
+    # page per deploy, which is how a monitor gets muted.
+    #
+    # A pod is identified as terminating by having a deletionTimestamp. The
+    # filtering happens in awk rather than in the jsonpath because kubectl's
+    # jsonpath has no usable negation for a missing field.
+    local pod_state
+    pod_state="$(kubectl -n "$K8S_NAMESPACE" get pods \
         -l "app.kubernetes.io/name=${K8S_DEPLOYMENT}" \
-        -o 'jsonpath={range .items[*]}{.metadata.name}{"="}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
-        2>/dev/null | grep -v '=True$' || true)"
+        -o 'jsonpath={range .items[*]}{.metadata.name}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+        2>/dev/null)"
 
-    if [ -z "$not_ready" ]; then
-        sc_ok "all pods report Ready"
-        sc_event "health_check" "result=success" "check=pod_readiness"
+    local terminating
+    terminating="$(printf '%s\n' "$pod_state" | awk -F'|' 'NF && $2 != "" {print "     " $1 " (terminating)"}')"
+    not_ready="$(printf '%s\n' "$pod_state" \
+        | awk -F'|' 'NF && $2 == "" && $3 != "True" {print $1 "=" ($3 == "" ? "unknown" : $3)}')"
+
+    # -----------------------------------------------------------------------
+    # THE GATE IS THE DEPLOYMENT, NOT THE POD LIST.
+    #
+    # "Is every pod Ready?" is the wrong question for a monitor, and getting
+    # it wrong here costs the same thing a bad liveness probe costs. During
+    # any healthy rolling update there is a brand new pod that is not Ready
+    # yet, because it is still starting. Failing on that means reporting an
+    # outage every time a deploy happens, which is a page per deploy.
+    #
+    # The question worth asking is whether the service can serve, and
+    # Kubernetes already computes that: the Deployment's Available condition
+    # accounts for how many replicas are up versus how many it is allowed to
+    # lose. Two conditions, two different meanings, exactly like readiness and
+    # liveness on a pod:
+    #
+    #   Available   can this Deployment serve right now? False is an outage.
+    #   Progressing is the rollout still moving? False with reason
+    #               ProgressDeadlineExceeded means it is wedged, while the old
+    #               version usually keeps serving perfectly. Different
+    #               severity, different exit code, not an outage.
+    #
+    # Individual not-Ready pods are printed either way, because they are the
+    # detail you want when something IS wrong. They just do not decide the
+    # exit code on their own.
+    # -----------------------------------------------------------------------
+    local available progressing progress_reason replicas
+    available="$(kubectl -n "$K8S_NAMESPACE" get "deployment/${K8S_DEPLOYMENT}" \
+        -o 'jsonpath={.status.conditions[?(@.type=="Available")].status}' 2>/dev/null)"
+    progressing="$(kubectl -n "$K8S_NAMESPACE" get "deployment/${K8S_DEPLOYMENT}" \
+        -o 'jsonpath={.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null)"
+    progress_reason="$(kubectl -n "$K8S_NAMESPACE" get "deployment/${K8S_DEPLOYMENT}" \
+        -o 'jsonpath={.status.conditions[?(@.type=="Progressing")].reason}' 2>/dev/null)"
+    replicas="$(kubectl -n "$K8S_NAMESPACE" get "deployment/${K8S_DEPLOYMENT}" \
+        -o 'jsonpath={.status.readyReplicas}/{.spec.replicas}' 2>/dev/null)"
+
+    if [ "$available" = "True" ]; then
+        sc_ok "deployment is Available (${replicas:-?} replicas ready)"
+        sc_event "health_check" "result=success" "check=deployment_available"
     else
-        sc_err "pods not Ready:"
-        printf '%s\n' "$not_ready" | sed 's/^/     /'
-        sc_event "health_check" "result=failure" "check=pod_readiness"
+        sc_err "deployment is NOT Available (${replicas:-0} replicas ready): the service cannot serve"
+        sc_event "health_check" "result=failure" "check=deployment_available"
         rc=2
+    fi
+
+    if [ "$progressing" != "True" ] || [ "$progress_reason" = "ProgressDeadlineExceeded" ]; then
+        sc_err "rollout is wedged (Progressing=${progressing:-?}, reason=${progress_reason:-none})"
+        sc_dim "the previous version is probably still serving; this is stuck, not down"
+        sc_event "health_check" "result=failure" "check=deployment_progressing" \
+            "reason=${progress_reason:-unknown}"
+        [ "$rc" -eq 0 ] && rc=3
+    fi
+
+    if [ -n "$not_ready" ]; then
+        sc_dim "pods not Ready (informational unless Available is False above):"
+        printf '%s\n' "$not_ready" | sed 's/^/     /'
+    fi
+
+    # Shown, never counted. A pod on its way out has already left the Service
+    # endpoints and something else is serving in its place.
+    if [ -n "$terminating" ]; then
+        sc_dim "rollout in progress, ignoring pods on their way out:"
+        printf '%s\n' "$terminating"
     fi
 
     sc_step "3/3 restarts (livenessProbe verdicts the kubelet already acted on)"

@@ -370,15 +370,42 @@ deploy_k8s() {
     sc_step "3/5 applying manifests"
     kubectl apply -f "${SOUNDCHECK_ROOT}/k8s/namespace.yaml"
     kubectl -n "$K8S_NAMESPACE" apply -f "${SOUNDCHECK_ROOT}/k8s/configmap.yaml"
-    kubectl -n "$K8S_NAMESPACE" apply -f "${SOUNDCHECK_ROOT}/k8s/deployment.yaml"
     kubectl -n "$K8S_NAMESPACE" apply -f "${SOUNDCHECK_ROOT}/k8s/service.yaml"
 
-    sc_step "4/5 setting image to ${IMAGE_REPO}:${VERSION}"
-    # `kubectl set image` is what creates a new revision. Recording the
-    # change-cause makes `kubectl rollout history` readable instead of a
-    # column of <none>.
-    kubectl -n "$K8S_NAMESPACE" set image \
-        "deployment/${K8S_DEPLOYMENT}" "app=${IMAGE_REPO}:${VERSION}"
+    # -----------------------------------------------------------------------
+    # The Deployment is applied with the version substituted in, rather than
+    # applied verbatim and then corrected with `kubectl set image`.
+    #
+    # The obvious ordering, apply-then-set-image, is wrong, and it fails in a
+    # way that still reports success. deployment.yaml carries a placeholder
+    # tag, so `apply` first reconciles the Deployment TO that placeholder:
+    # Kubernetes creates a ReplicaSet for an image that does not exist, the
+    # pods go ErrImagePull, and only then does `set image` create a second
+    # ReplicaSet with the real tag. The rollout succeeds, so nothing complains.
+    #
+    # Two things break quietly as a result. Every deploy burns two revisions,
+    # so revisionHistoryLimit: 5 buys two rollbacks rather than five, which is
+    # exactly the depth this repo added retention to guarantee. And every
+    # deploy emits genuine ImagePullBackOff events, which is precisely the
+    # noise that trains you to ignore a real pull failure.
+    #
+    # sed rather than a templating tool: it is one field, and adding
+    # Kustomize or Helm here would import a dependency to solve a problem
+    # that is one substitution wide. `kubectl apply -f -` reads the rendered
+    # manifest from stdin, so nothing is written to disk.
+    # -----------------------------------------------------------------------
+    # Two substitutions, one pass: the image tag and APP_VERSION. They have to
+    # move together, because APP_VERSION is what the app reports in
+    # soundcheck_app_info, and a deploy where the image says 1.2.0 while the
+    # metric says something else is worse than either being wrong alone.
+    sc_step "4/5 applying the Deployment at ${IMAGE_REPO}:${VERSION}"
+    sed -e "s|image: ${IMAGE_REPO}:latest|image: ${IMAGE_REPO}:${VERSION}|" \
+        -e "s|value: \"0.0.0-dev\"|value: \"${VERSION}\"|" \
+        "${SOUNDCHECK_ROOT}/k8s/deployment.yaml" \
+        | kubectl -n "$K8S_NAMESPACE" apply -f -
+
+    # Recording the change-cause makes `kubectl rollout history` readable
+    # instead of a column of <none>, which is what encore.sh --k8s reads.
     kubectl -n "$K8S_NAMESPACE" annotate "deployment/${K8S_DEPLOYMENT}" \
         kubernetes.io/change-cause="showtime.sh ${VERSION}" --overwrite >/dev/null
 

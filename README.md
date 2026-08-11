@@ -423,8 +423,48 @@ The Docker flow has been run end to end. What that run showed, in order:
 
 shellcheck passes at `-S style` with `-x` across all six scripts.
 
-The Kubernetes flow is written and reviewed but has not been run against a
-live Kind cluster yet, and I would rather say that than imply otherwise.
+The Kubernetes flow has now been run too, on a three-node Kind cluster, and
+running it found three more bugs that reading it had not:
+
+- **Every `--k8s` deploy created two revisions and a real `ImagePullBackOff`.**
+  `kubectl apply` reconciled the Deployment to the manifest's placeholder tag
+  first, so Kubernetes rolled out an image that does not exist, and only then
+  did `kubectl set image` correct it. The rollout reported success either way.
+  Two quiet costs: `revisionHistoryLimit: 5` bought two rollbacks instead of
+  five, and every deploy emitted genuine pull failures, which is the noise
+  that teaches you to ignore a real one. The version is now substituted into
+  the manifest before applying: one revision per deploy, zero pull failures.
+- **`soundcheck.sh --k8s` reported a false outage during every rollout.** It
+  failed on any pod that was not Ready, and a rolling update always has one
+  pod starting and one terminating. On a cron that is a page per deploy. It
+  now gates on the Deployment's own `Available` and `Progressing` conditions,
+  which is the same readiness-versus-liveness distinction one level up:
+  `Available=False` is an outage and exits 2, `ProgressDeadlineExceeded` is a
+  wedged rollout with the old version still serving and exits 3. Individual
+  pods are printed as detail and no longer decide the exit code.
+- **Nothing set `APP_VERSION` in Kubernetes mode.** Docker mode passes it with
+  `-e`; the Deployment had no equivalent, so the app reported `0.0.0-dev` no
+  matter what was deployed. Since `soundcheck_app_info` carries the version as
+  a *label*, the Grafana "Live version" panel and the deploy-detection built
+  on version changes were both blind in `--k8s` while still displaying
+  something plausible. Found by curling the Service rather than by reading the
+  manifest.
+
+`progressDeadlineSeconds` is now 120 so the cluster and `showtime.sh --k8s`
+agree on when a rollout has failed, instead of the script giving up at two
+minutes while the Deployment claimed to be progressing for another eight.
+
+The verified matrix:
+
+| scenario | `showtime` | `soundcheck` |
+|---|---|---|
+| healthy steady state | 0 | 0 |
+| healthy rollout in flight | | 0, no false page |
+| readiness fails, rollout wedges | 3 | 3, `Available=True` |
+| rollback via `rollout undo` | | 0 |
+
+Still unrun: the Helm observability path in `k8s/observability/`, because
+`helm` is not installed on this machine.
 
 ## What I learned
 
