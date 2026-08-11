@@ -53,7 +53,8 @@ jobs:
           shellcheck --version
           shellcheck -x -S style \
             showtime.sh soundcheck.sh encore.sh \
-            lib/common.sh k8s/observability/install.sh tests/test_common.sh
+            lib/common.sh bin/audience.sh \
+            k8s/observability/install.sh tests/test_common.sh
 
       - name: Assert every curl uses -f unless it says why not
         # A repo-specific rule no generic linter can enforce: `curl -s` without

@@ -168,6 +168,25 @@ def test_health_fail_returns_http_error(client, monkeypatch):
     assert response.get_json()["status"] == "unhealthy"
 
 
+def test_boom_always_fails(client):
+    """The demo failure endpoint returns 500 and is counted as an error.
+
+    bin/audience.sh sends a configurable fraction of its traffic here to move
+    the success rate, so both halves matter: the status has to be a real 5xx,
+    and it has to land on a route the alert expression includes rather than on
+    <unmatched>, which is deliberately excluded.
+    """
+    before = client.get("/metrics").get_json()["failed_requests"]
+    response = client.get("/boom")
+    after = client.get("/metrics").get_json()["failed_requests"]
+
+    assert response.status_code == 500
+    assert after - before == 1
+
+    body = client.get("/metrics/prometheus").get_data(as_text=True)
+    assert 'route="/boom",result="error"' in body
+
+
 def test_health_fail_is_off_by_default(client):
     """The demo switch must never be on unless it was asked for."""
     assert app_module.HEALTH_FAIL is False

@@ -387,6 +387,52 @@ ConfigMap labelled `grafana_dashboard=1` for Grafana's sidecar to pick up, and
 the rules work because a `PrometheusRule` spec is a top-level `groups:` list,
 exactly like the native rules file, so the conversion is a two-space indent.
 
+## Watching the alert actually fire
+
+Every observability feature here was unfalsifiable until there was traffic.
+The only requests the service ever saw were its own health checks, about one
+every two seconds, so the error ratio was pinned at zero, the alert could not
+fire, and the dashboard drew flat lines. Configuration that looks right and
+has never been shown to work is not monitoring.
+
+[`bin/audience.sh`](bin/audience.sh) sends traffic with a dial for how much of
+it fails:
+
+```bash
+docker compose -f observability/docker-compose.yml up -d
+./showtime.sh 1.0.0
+./bin/audience.sh --rps 15 --error-rate 0.35 --duration 360
+```
+
+Watched through Prometheus, that produced the whole chain:
+
+```
+success rate      83.73%   (below the 95% threshold)
+02:07:13  inactive
+02:07:33  pending          <- expression true, waiting out `for: 2m`
+02:09:34  firing
+```
+
+and Alertmanager received it, grouped as configured:
+
+```
+SoundcheckLowSuccessRate   warning   active
+SoundcheckVersionChanged   info      active
+```
+
+Two minutes in `pending` is exactly the `for: 2m` clause doing its job, which
+is the part that stops a single bad scrape from paging anyone. The `info`
+alert arriving in its own group is the routing in `alertmanager.yml` working:
+a deploy feed and a page do not belong in the same channel.
+
+Building the generator turned up two bugs in itself, both found by measuring
+rather than reading. Asking for 20 requests per second produced 4, because
+each iteration spawned curl, awk and sleep, and process creation on Windows
+costs more than the request does; it now issues one curl per second with the
+whole batch of URLs. And asking for a 25% error rate produced 30.5%, because
+`$RANDOM % 10000` is biased when 32768 is not a multiple of 10000. Both are
+small. Both would have made every number the tool reported quietly wrong.
+
 ## Status
 
 Two suites pass: 17 pytest cases (up from 4) and 38 shell cases for
@@ -497,10 +543,6 @@ rather than comments saying to be careful.
 
 ## What is next
 
-- A load generator, so the alert rule, the dashboard and the HPA have real
-  traffic to react to instead of a synthetic switch. Health checks alone give
-  the rate() expression a pulse, but not enough of one to watch it cross a
-  threshold.
 - Run the Kubernetes flow against a live Kind cluster, the way the Docker one
   now has been.
 - The `metronome` bridge: this repo's Prometheus rules and dashboard are the

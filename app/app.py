@@ -189,6 +189,31 @@ def health():
     })
 
 
+@app.route("/boom")
+def boom():
+    """Always fails, on purpose. The other half of the demo switch.
+
+    HEALTH_FAIL makes the health endpoint fail, which demonstrates the
+    `curl -s` versus `curl -sf` bug. This demonstrates the other claim in the
+    README: that the Prometheus alert reacts to a real error ratio.
+
+    An error endpoint is needed because the alternatives do not work. A 404
+    is deliberately excluded from the alert expression, since a scanner
+    hitting random URLs is not the service failing. Toggling HEALTH_FAIL
+    requires a redeploy and takes the service fully down rather than
+    degrading it. This gives bin/audience.sh a dial: send some fraction of
+    traffic here and the success rate lands wherever you want it.
+
+    It counts as an error on route /boom, which the alert does include, so
+    the number the rule evaluates is a real measurement of real requests
+    rather than a metric written by hand to make a dashboard look busy.
+    """
+    return jsonify({
+        "error": "boom",
+        "detail": "this endpoint exists to fail; see bin/audience.sh",
+    }), 500
+
+
 @app.route("/metrics")
 def get_metrics():
     """Original JSON metrics. Shape is frozen. Soundcheck.sh parses it."""

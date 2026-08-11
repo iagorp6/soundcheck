@@ -458,7 +458,7 @@ if command -v curl >/dev/null 2>&1 && start_server; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
 else
-    CURRENT="HTTP tests (7 cases, including the curl -s vs -sf proof)"
+    CURRENT="HTTP tests (7 cases, including the -s versus -sf proof)"
     skip "need curl and a working Python 3"
 fi
 

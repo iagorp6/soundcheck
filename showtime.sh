@@ -125,18 +125,35 @@ CANDIDATE_URL="http://localhost:${CANDIDATE_PORT}${HEALTH_PATH}"
 # key controlled both would be tidier and untrue.
 # ===========================================================================
 prune_old_versions() {
-    local keep="$RETENTION_COUNT" versions=() v idx=0
+    local keep="$RETENTION_COUNT" versions=() v idx=0 in_use
     while IFS= read -r v; do
         [ -n "$v" ] && versions+=("$v")
     done < <(sc_history_versions)
 
     [ "${#versions[@]}" -gt "$keep" ] || { sc_dim "retention: ${#versions[@]}/${keep} versions kept, nothing to prune"; return 0; }
 
+    # Every image any container references, running or stopped.
+    #
+    # Checking only "is this the version I am deploying" is not enough, and
+    # this bit me for real: deploying repeatedly in --k8s mode pruned the
+    # image that the Docker-mode container was still running on. The container
+    # survives, because Docker pins it by image ID, but the TAG disappears,
+    # and the next Docker-mode deploy then fell over trying to tag an image
+    # name that no longer resolved.
+    #
+    # Retention is allowed to delete old images. It is not allowed to delete
+    # one that something is currently using.
+    in_use="$(docker ps -a --format '{{.Image}}' 2>/dev/null || true)"
+
     for v in "${versions[@]}"; do
         idx=$((idx + 1))
         [ "$idx" -le "$keep" ] && continue
-        # Never delete what is running right now, whatever history says.
+        # Never delete what is being deployed right now, whatever history says.
         [ "$v" = "$VERSION" ] && continue
+        if printf '%s\n' "$in_use" | grep -qxF "${IMAGE_REPO}:${v}"; then
+            sc_dim "retention: keeping ${IMAGE_REPO}:${v}, a container still references it"
+            continue
+        fi
         if docker image inspect "${IMAGE_REPO}:${v}" >/dev/null 2>&1; then
             sc_dim "retention: removing ${IMAGE_REPO}:${v}"
             docker image rm "${IMAGE_REPO}:${v}" >/dev/null 2>&1 \
@@ -174,7 +191,21 @@ deploy_docker() {
     old_image="$(docker inspect --format='{{.Config.Image}}' "$APP_NAME" 2>/dev/null || true)"
     if [ -n "$old_image" ]; then
         sc_ok "currently live: ${old_image}"
-        docker tag "$old_image" "${IMAGE_REPO}:previous"
+        # A running container can outlive the tag it was started from: the
+        # image is pinned by ID inside Docker, but the NAME can be deleted,
+        # and retention in the other mode is perfectly capable of deleting it.
+        # `docker tag` then fails with a bare daemon error, and under `set -e`
+        # that killed the whole deploy at step 2 over a bookkeeping alias.
+        #
+        # Losing the :previous shortcut is not a reason to refuse to deploy.
+        # encore.sh reads deploy_history.log first and only falls back to that
+        # tag, so the rollback path survives this.
+        if docker image inspect "$old_image" >/dev/null 2>&1; then
+            docker tag "$old_image" "${IMAGE_REPO}:previous"
+        else
+            sc_warn "live container references ${old_image}, which is no longer on this host"
+            sc_dim "leaving the :previous alias alone; encore.sh uses the history file"
+        fi
     else
         sc_dim "nothing live yet: treating this as a first deploy"
     fi
